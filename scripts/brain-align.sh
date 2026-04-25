@@ -112,6 +112,128 @@ for pair in "${RENAME_PAIRS[@]}"; do
   fi
 done
 
+# === Step 2b: Discover and categorize ALL .md files ===
+echo ""
+echo "━━━ Scanning all .md files (including symlinks) ━━━"
+
+# Find all .md files (including those reachable via symlinks)
+# -L: follow symlinks; -type f: regular files; -type l: symlinks
+MD_FILES=$(find -L "$PROJECT_DIR" \
+  -path "$PROJECT_DIR/.git" -prune -o \
+  -path "$PROJECT_DIR/node_modules" -prune -o \
+  -path "$PROJECT_DIR/.parent-automation/brain-snapshot" -prune -o \
+  -path "$PROJECT_DIR/.parent-automation/pre-align-backup-*" -prune -o \
+  \( -name "*.md" -type f -o -name "*.md" -type l \) \
+  -print 2>/dev/null)
+
+DOC_INVENTORY="$PROJECT_DIR/.planning/doc-inventory.md"
+if [[ "$DRY_RUN" == "false" ]]; then
+  mkdir -p "$PROJECT_DIR/.planning"
+  {
+    echo "# Documentation Inventory — $TIMESTAMP"
+    echo ""
+    echo "**Project:** $(basename "$PROJECT_DIR")"
+    echo "**Total .md files:** $(echo "$MD_FILES" | grep -c .)"
+    echo ""
+    echo "## File Listing"
+    echo ""
+    echo "| Path | Type | Symlink Target | Category |"
+    echo "|------|------|----------------|----------|"
+  } > "$DOC_INVENTORY"
+fi
+
+while IFS= read -r mdfile; do
+  [[ -z "$mdfile" ]] && continue
+  REL_PATH="${mdfile#$PROJECT_DIR/}"
+
+  # Determine type
+  FILE_TYPE="file"
+  SYMLINK_TARGET="-"
+  if [[ -L "$mdfile" ]]; then
+    FILE_TYPE="symlink"
+    SYMLINK_TARGET=$(readlink "$mdfile" 2>/dev/null || echo "broken")
+    # Check if symlink is broken
+    if [[ ! -e "$mdfile" ]]; then
+      WARNINGS+=("Broken symlink: $REL_PATH → $SYMLINK_TARGET")
+    fi
+  fi
+
+  # Categorize by location and name pattern
+  CATEGORY="unclassified"
+  case "$REL_PATH" in
+    .planning/*) CATEGORY="planning" ;;
+    tasks/*) CATEGORY="tasks" ;;
+    docs/*|documentation/*|architecture/*|adr/*|decisions/*) CATEGORY="documentation" ;;
+    runbooks/*|operations/*) CATEGORY="runbooks" ;;
+    specs/*|requirements/*) CATEGORY="specs" ;;
+    src/*|lib/*) CATEGORY="inline-code-doc" ;;
+    test/*|tests/*|__tests__/*) CATEGORY="test-doc" ;;
+    examples/*|samples/*) CATEGORY="examples" ;;
+    .parent-automation/*) CATEGORY="brain-internal" ;;
+    CLAUDE.md|README.md|LICENSE.md|CHANGELOG.md|CONTRIBUTING.md|SECURITY.md) CATEGORY="standard-root" ;;
+    */CLAUDE.md|*/README.md) CATEGORY="nested-readme" ;;
+    *)
+      # Pattern-match by content
+      if [[ -r "$mdfile" ]]; then
+        FIRST_LINE=$(head -1 "$mdfile" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+        case "$FIRST_LINE" in
+          *learning*|*lesson*) CATEGORY="lessons-loose" ;;
+          *todo*|*backlog*) CATEGORY="todo-loose" ;;
+          *decision*|*adr*) CATEGORY="decision-loose" ;;
+          *roadmap*|*plan*) CATEGORY="planning-loose" ;;
+          *requirement*|*spec*) CATEGORY="spec-loose" ;;
+          *) CATEGORY="other" ;;
+        esac
+      fi
+      ;;
+  esac
+
+  if [[ "$DRY_RUN" == "false" ]]; then
+    echo "| $REL_PATH | $FILE_TYPE | $SYMLINK_TARGET | $CATEGORY |" >> "$DOC_INVENTORY"
+  fi
+
+  # Auto-relocate loose canonical files
+  case "$CATEGORY" in
+    lessons-loose)
+      TARGET="$PROJECT_DIR/tasks/lessons.md"
+      if [[ ! -f "$TARGET" ]]; then
+        CHANGES+=("Categorized: $REL_PATH → tasks/lessons.md (was loose)")
+        if [[ "$DRY_RUN" == "false" ]]; then
+          mkdir -p "$PROJECT_DIR/tasks"
+          mv "$mdfile" "$TARGET"
+        fi
+      else
+        WARNINGS+=("Loose lessons file: $REL_PATH (target tasks/lessons.md exists, manual merge needed)")
+      fi
+      ;;
+    todo-loose)
+      TARGET="$PROJECT_DIR/tasks/todo.md"
+      if [[ ! -f "$TARGET" ]]; then
+        CHANGES+=("Categorized: $REL_PATH → tasks/todo.md (was loose)")
+        if [[ "$DRY_RUN" == "false" ]]; then
+          mkdir -p "$PROJECT_DIR/tasks"
+          mv "$mdfile" "$TARGET"
+        fi
+      else
+        WARNINGS+=("Loose todo file: $REL_PATH (target tasks/todo.md exists, manual merge needed)")
+      fi
+      ;;
+    decision-loose)
+      WARNINGS+=("Loose decision file: $REL_PATH — consider moving to docs/decisions/ or .planning/")
+      ;;
+  esac
+done <<< "$MD_FILES"
+
+# === Step 2c: Index symlinks pointing into vault or external docs ===
+SYMLINK_COUNT=$(echo "$MD_FILES" | xargs -I{} test -L {} && echo "{}" 2>/dev/null | wc -l | tr -d ' ')
+if [[ "$SYMLINK_COUNT" -gt 0 ]]; then
+  CHANGES+=("Found $SYMLINK_COUNT symlinked .md files (cataloged in doc-inventory.md)")
+fi
+
+if [[ "$DRY_RUN" == "false" ]]; then
+  CHANGES+=("Generated doc-inventory.md (categorized all .md files)")
+fi
+
 # === Step 3: Migrate project lessons to vault ===
 echo ""
 echo "━━━ Migrating lessons to vault ━━━"
