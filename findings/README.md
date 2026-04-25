@@ -38,4 +38,34 @@ Findings ingested from all projects' tasks/gemini-audits/findings/ and signal bu
 
 ---
 
-*Structure established 2026-04-25*
+## Ingestion Status
+
+### Strategix Service Desk (Phase 1) — 2026-04-25
+
+**16 findings ingested** from tasks/gemini-audits/findings/ (audits from 2026-04-24 to 2026-04-25)
+
+**Classification:**
+| Scope | Count | Status |
+|-------|-------|--------|
+| Schema Drift | 3 | phase2-schema-audit, pm-problem-schema-audit, migration-metadata-collision |
+| RBAC Lockout | 1 | problem-management-itil-audit |
+| Contradiction | 1 | problem-management-alpha-drift |
+| Implementation Drift | 11 | See implementation-drift-summary.md |
+
+**Key Synthesis:**
+- **Pattern 1: Deferred Design Decisions** — RBAC scope, priority nullability, problem phase all NEEDS-CLARIFICATION before compute layer
+- **Pattern 2: Implementation Consistency** — Route/compute/event discipline varies across 11 Phase 1 features; Phase 2 planning should establish canonical pattern
+- **Pattern 3: Specification Gaps** — Schema, ROADMAP, and CLAUDE.md incompleteness drove many findings; need spec completeness gate
+
+**Lesson Candidates:**
+- L-020: Manager role narrowing (RBAC)
+- L-022: Event emission on mutations (integration)
+- L-023: State machine discipline (compute)
+- L-024: Migration metadata management (schema)
+- L-025: Specification completeness gate (planning)
+
+**Next action:** See `by-customer/strategix/INDEX.md` for full findings breakdown and Phase 2 planning recommendations.
+
+---
+
+*Structure established 2026-04-25. Strategix findings ingested 2026-04-25.*
