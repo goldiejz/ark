@@ -132,7 +132,7 @@ See `DEPLOYMENT_STATUS.md` for live deployment details.
      --project-name "Your Project"
    ```
 
-3. **Decision logged automatically** → Phase 6 analyzes it next Monday
+3. **Decision logged automatically** → Phase 6 runs immediately + weekly audit
 
 ## Integration with Projects
 
@@ -142,20 +142,31 @@ Each Strategix project has:
 - `query-brain.ts` — Interface to snapshot
 - `new-project-bootstrap-v2.ts` — 12-step bootstrap with brain integration
 
-## Weekly Automation
+## Observability: Dual-Mode Phase 6
 
-**Phase 6 Observability Daemon** (Monday 9am):
-- Reads decision logs from all 3 repos
-- Detects universal decisions (80%+ threshold)
-- Calculates lesson effectiveness (prevented/violated ratio)
-- Updates `cross-customer-insights.md`
+### Event-Triggered (Immediate)
+Runs instantly when bootstrap logs a decision:
+- Detects patterns across decision logs
 - Updates `lesson-effectiveness.md`
+- Recalibrates model weights
+- Refreshes cache
+- Next project benefits immediately
+
+### Cron-Based (Weekly Safety Audit)
+**Phase 6 Observability Daemon** (Monday 9am):
+- Audits all decision logs were processed
+- Reconciles state if event-triggered runs failed
+- Calculates lesson effectiveness (prevented/violated ratio)
+- Generates comprehensive `cross-customer-insights.md`
+- Archives weekly metrics
 
 **Phase 6-Extended** (Monday 9am):
 - Fetches latest Claude, Codex, Gemini models
 - Recalculates decision weights based on new capabilities
 - Updates `model-weight-adjustments.md`
 - Zero manual intervention needed
+
+**Result:** Immediate improvements + weekly audit trail for resilience
 
 ## Command Reference
 

@@ -25,12 +25,13 @@
 | Decision Logging | `.planning/bootstrap-decisions.jsonl` (all 3 repos) | ✅ Ready |
 
 ### Observability Pipeline
-| Phase | Component | Status | Next |
-|-------|-----------|--------|------|
-| **6** | Pattern Detection Daemon | ✅ Ready | Waiting on first bootstrap decision log |
-| **6-Ext** | Model Registry Auto-Update | ✅ Ready | Waiting on API keys |
-| **7** | Tier Resolver (Dynamic Models) | ✅ Ready | Will use on next bootstrap |
-| **7-Ext** | Multi-Model Offloading | ✅ Ready | Will route to Codex/Gemini when needed |
+| Phase | Component | Status | Trigger |
+|-------|-----------|--------|---------|
+| **6** | Pattern Detection Daemon (Event-Triggered) | ✅ Ready | Decision log write (immediate) |
+| **6** | Pattern Detection Daemon (Weekly Audit) | ✅ Ready | Monday 9am cron (safety pass) |
+| **6-Ext** | Model Registry Auto-Update | ✅ Ready | Monday 9am cron (with Phase 6) |
+| **7** | Tier Resolver (Dynamic Models) | ✅ Ready | On every bootstrap (uses latest registry) |
+| **7-Ext** | Multi-Model Offloading | ✅ Ready | Routes by task characteristics |
 
 ---
 
