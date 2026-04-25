@@ -73,39 +73,46 @@ cp -r ~/.parent-automation/brain-snapshot ~/code/customerA-servicedesk/.parent-a
 ## How the Self-Improving Loop Works Now
 
 ```
-Week 1: Mon 9am
-  ↓ First bootstrap decision recorded
+Project A Bootstrap
+  ↓ Completes → decision logged to .planning/bootstrap-decisions.jsonl
   ↓
 
-Week 2: Mon 9am Phase 6 Daemon Runs
-  ↓ Reads: .planning/bootstrap-decisions.jsonl (Week 1 bootstrap)
+Phase 6 Daemon Runs IMMEDIATELY (triggered by decision log)
+  ↓ Reads: decision logs from all projects
   ↓ Detects: "Purpose resolved, RBAC designed, all checklist items ✓"
   ↓ Updates: lesson-effectiveness.md (all lessons 100% effective, n=1 sample)
-  ↓ Outputs: cross-customer-insights.md (no patterns yet, only 1 project)
+  ↓ Outputs: cross-customer-insights.md (no cross-project patterns yet)
+  ↓ Cache refreshed, ready for next project
   ↓
 
-Week 3: Second Bootstrap
-  ↓ Uses brain: cached RBAC template → faster (Haiku instead of Sonnet)
-  ↓ Records decision
+Project B Bootstrap (hours/days after Project A)
+  ↓ Queries brain: "lessons for [project-type]"
+  ↓ Gets improved cache (40% faster, cheaper — Haiku instead of Sonnet)
+  ↓ Completes → decision logged
   ↓
 
-Week 4: Mon 9am Phase 6 Runs Again
-  ↓ Reads: 2 decision logs
+Phase 6 Runs IMMEDIATELY (triggered by Project B's decision log)
+  ↓ Reads: 2 decision logs (A + B)
   ↓ Detects: "RBAC is universal (2/2 projects)", "Lessons prevented mistakes"
   ↓ Updates: lesson-effectiveness now 100% with n=2
   ↓ Outputs: "RBAC centralization: mandatory decision point (100% projects)"
+  ↓ Model weights recalibrated based on actual cost/quality data
+  ↓ Cache updated
   ↓
 
-Week 5: Third Bootstrap
-  ↓ Inherit lessons from Project A + Project B
+Project C Bootstrap (immediately after Phase 6 completes)
+  ↓ Inherits lessons from Project A + Project B
   ↓ Bootstrap 50% faster (cache hit rate improving)
+  ↓ Cheaper (better tier selection from improved model registry)
+  ↓ Completes → decision logged
   ↓
 
-Week 6 onwards: Loop Compounds
+Loop Compounds Immediately
   ↓ Each new project learns from all prior projects
   ↓ Token cost drops (more cached, cheaper tiers used)
   ↓ Speed improves (more templates, fewer decisions)
   ↓ Quality improves (contradictions caught pre-merge)
+  ↓ No waiting for "Monday 9am" — improvements apply instantly
 ```
 
 ---

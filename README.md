@@ -47,23 +47,32 @@ automation-brain/
 ### The Self-Improving Loop
 
 ```
-Week 1: Bootstrap project A → decision logged
+Bootstrap Project A starts
         ↓
-Week 2 (Monday 9am): Phase 6 daemon runs
-        → Reads decision logs
-        → Detects universal patterns
+Project A completes → decision logged to .planning/bootstrap-decisions.jsonl
+        ↓
+Phase 6 daemon runs IMMEDIATELY (triggered by decision log write)
+        → Reads decision logs from all projects
+        → Detects universal patterns (if 2+ projects share pattern)
         → Updates lesson-effectiveness.md
         → Recalibrates model weights
+        → Cache refreshed
         ↓
-Week 3: Bootstrap project B
+Bootstrap Project B starts (minutes/hours after Project A)
+        → Queries brain: "lessons for this project type"
         → Uses improved cache (40% faster, cheaper)
         → Contributes new lessons
         ↓
-Week 4: Phase 6 runs again
+Phase 6 runs again IMMEDIATELY (triggered by Project B's decision log)
         → Sees patterns from A + B
         → Surfaces universal doctrine
+        → Model weights recalibrated based on actual cost/quality
         ↓
-Week 5+: Loop compounds across all projects
+Bootstrap Project C starts
+        → Inherits lessons from A + B
+        → Even faster, even cheaper
+        ↓
+Loop compounds: Each project improves the next immediately, not in weeks
 ```
 
 ### Key Metrics Tracked
