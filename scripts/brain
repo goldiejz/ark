@@ -168,6 +168,7 @@ Commands:
   sync          Pull latest vault, refresh local snapshot (default)
   status        Show snapshot + decision log state
   bootstrap     Run new project bootstrap (with brain queries)
+  align         Standardize imported project to canonical structure
   insights      Show cross-project insights from Phase 6
   lessons       List all lessons in the brain
   phase-6       Manually trigger Phase 6 observability daemon
@@ -184,6 +185,12 @@ Examples:
 EOF
 }
 
+cmd_align() {
+  print_header
+  shift_args=("${@:2}")
+  bash "$VAULT_PATH/scripts/brain-align.sh" "${shift_args[@]:-$PROJECT_DIR}"
+}
+
 # Default command: sync + status
 case "$COMMAND" in
   default|"")
@@ -194,6 +201,7 @@ case "$COMMAND" in
   sync)       cmd_sync ;;
   status)     cmd_status ;;
   bootstrap)  cmd_bootstrap ;;
+  align)      cmd_align "$@" ;;
   insights)   cmd_insights ;;
   lessons)    cmd_lessons ;;
   phase-6)    cmd_phase6 ;;
