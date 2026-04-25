@@ -1,0 +1,27 @@
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Temporary files
+*.tmp
+*.temp
+.DS_Store
+
+# Node modules (if any)
+node_modules/
+
+# IDE
+.vscode/
+.idea/
+
+# Environment files
+.env
+.env.local
+
+# Obsidian workspace settings (user-specific)
+.obsidian/workspace.json
+.obsidian/app.json
+
+# Auto-generated runtime files
+*.lock
