@@ -159,10 +159,15 @@ class DynamicModelRegistry {
 
   private async fetchClaudeModels(): Promise<ModelMetadata[]> {
     try {
+      if (!this.apiKeys.anthropic) {
+        return [];
+      }
       const response = await fetch("https://api.anthropic.com/v1/models", {
         headers: {
-          Authorization: `Bearer ${this.apiKeys.anthropic}`,
+          "x-api-key": this.apiKeys.anthropic,
+          "anthropic-version": "2023-06-01",
         },
+        signal: AbortSignal.timeout(15000),
       });
 
       if (!response.ok) {
@@ -278,8 +283,17 @@ class DynamicModelRegistry {
 
   private async fetchGeminiModels(): Promise<ModelMetadata[]> {
     try {
+      if (!this.apiKeys.google) {
+        return [];
+      }
       const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models?key=${this.apiKeys.google}`
+        "https://generativelanguage.googleapis.com/v1beta/models",
+        {
+          headers: {
+            "x-goog-api-key": this.apiKeys.google,
+          },
+          signal: AbortSignal.timeout(15000),
+        }
       );
 
       if (!response.ok) {

@@ -70,10 +70,23 @@ async function loadBootstrapLogs(): Promise<BootstrapDecision[]> {
 
       for (const line of lines) {
         try {
-          const decision = JSON.parse(line) as BootstrapDecision;
-          logs.push(decision);
+          const parsed: unknown = JSON.parse(line);
+          if (
+            typeof parsed === "object" &&
+            parsed !== null &&
+            "projectName" in parsed &&
+            "customer" in parsed &&
+            "projectType" in parsed &&
+            Array.isArray((parsed as BootstrapDecision).decisionsApplied) &&
+            Array.isArray((parsed as BootstrapDecision).contradictionsResolved) &&
+            Array.isArray((parsed as BootstrapDecision).lessonsUsed)
+          ) {
+            logs.push(parsed as BootstrapDecision);
+          } else {
+            console.warn(`Skipping malformed decision (missing required fields)`);
+          }
         } catch (e) {
-          console.warn(`Failed to parse decision log line: ${line}`);
+          console.warn(`Failed to parse decision log line: ${line.substring(0, 80)}...`);
         }
       }
     }
@@ -297,7 +310,7 @@ ${JSON.stringify(patterns, null, 2)}
 \`\`\`
 `;
 
-  fs.writeFileSync(insightsPath, insightsContent);
+  atomicWrite(insightsPath, insightsContent);
   console.log(`✅ Updated ${insightsPath}`);
 
   // Update lesson-effectiveness.md
@@ -339,8 +352,18 @@ ${lessons
 Lessons with low violation counts (n < 3) may have artificially high scores due to sample size.
 `;
 
-  fs.writeFileSync(effectivenessPath, effectivenessContent);
+  atomicWrite(effectivenessPath, effectivenessContent);
   console.log(`✅ Updated ${effectivenessPath}`);
+}
+
+/**
+ * Write file atomically via temp + rename (POSIX rename is atomic).
+ * Prevents corruption if process is interrupted mid-write or two daemons run concurrently.
+ */
+function atomicWrite(targetPath: string, content: string): void {
+  const tmpPath = `${targetPath}.${process.pid}.tmp`;
+  fs.writeFileSync(tmpPath, content);
+  fs.renameSync(tmpPath, targetPath);
 }
 
 async function run() {
