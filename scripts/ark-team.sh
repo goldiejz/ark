@@ -193,7 +193,7 @@ build_context() {
     _plans=$(gsd_find_plan_files "$PHASE_DIR")
     if [[ -n "$_plans" ]]; then
       echo "## Phase Plan(s)"
-      while IFS= read -r _pf; do
+      while IFS= read -r _pf; do  # AOS: intentional gate — stream parsing, not stdin
         [[ -z "$_pf" ]] && continue
         echo ""
         echo "### $(basename "$_pf")"
