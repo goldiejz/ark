@@ -25,3 +25,7 @@ node_modules/
 
 # Auto-generated runtime files
 *.lock
+
+# Phase 2.5: SQLite WAL runtime artefacts (DB itself is checked in for snapshot)
+observability/*.db-shm
+observability/*.db-wal
