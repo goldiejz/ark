@@ -539,7 +539,214 @@ Inspect $proj_dir/.planning/STATE.md and recent activity. Resume the phase or cl
 #   continuous_status      — show last tick, next tick, recent decisions, daily token used
 #   continuous_pause       — touch PAUSE file
 #   continuous_resume      — rm PAUSE file
-#   continuous_plist_emit  — pure stdout plist generator (idempotent, byte-stable)
+#   _continuous_render_plist — atomic tmp+mv plist generator (idempotent, byte-stable)
+
+# Internal: render plist atomically. $1=output path. Returns 0/1.
+_continuous_render_plist() {
+  local out="$1"
+  [[ -z "$out" ]] && { echo "_continuous_render_plist: missing out path" >&2; return 1; }
+
+  local tick_min tick_sec script_path vault_path log_dir dir
+  tick_min=$(policy_config_get continuous.tick_interval_min 15 2>/dev/null)
+  [[ -z "$tick_min" ]] && tick_min=15
+  [[ "$tick_min" =~ ^[0-9]+$ ]] || tick_min=15
+  tick_sec=$(( tick_min * 60 ))
+
+  # Absolute script path (for ProgramArguments)
+  script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/$(basename "${BASH_SOURCE[0]}")"
+  vault_path="${ARK_HOME:-$HOME/vaults/ark}"
+  log_dir="$vault_path/observability"
+
+  dir="$(dirname "$out")"
+  mkdir -p "$dir" 2>/dev/null
+  mkdir -p "$log_dir" 2>/dev/null
+
+  local tmp
+  tmp="$(mktemp "$dir/.com.ark.continuous.XXXXXX.tmp")" || {
+    echo "ERROR: mktemp failed in $dir" >&2
+    return 1
+  }
+  # shellcheck disable=SC2064
+  trap "rm -f '$tmp'" EXIT INT TERM
+
+  cat > "$tmp" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.ark.continuous</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>$script_path</string>
+    <string>--tick</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>$tick_sec</integer>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>$log_dir/continuous-operation.log</string>
+  <key>StandardErrorPath</key>
+  <string>$log_dir/continuous-operation.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>ARK_HOME</key>
+    <string>$vault_path</string>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>
+PLIST
+
+  mv "$tmp" "$out" || { rm -f "$tmp"; trap - EXIT INT TERM; return 1; }
+  trap - EXIT INT TERM
+  return 0
+}
+
+# continuous_install — generate plist + best-effort launchctl load.
+continuous_install() {
+  local dir out
+  dir="${ARK_LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
+  mkdir -p "$dir" 2>/dev/null
+  out="$dir/com.ark.continuous.plist"
+
+  if ! _continuous_render_plist "$out"; then
+    echo "ERROR: failed to render plist at $out" >&2
+    return 1
+  fi
+
+  # Best-effort plutil validation (warn, don't fail, if plutil absent).
+  if command -v plutil >/dev/null 2>&1; then
+    plutil -lint "$out" >/dev/null 2>&1 || \
+      echo "warn: plutil -lint reported issues for $out" >&2
+  fi
+
+  # Best-effort launchctl load (real-system only — skip if test override active).
+  if [[ -z "${ARK_LAUNCHAGENTS_DIR:-}" ]] && command -v launchctl >/dev/null 2>&1; then
+    launchctl unload "$out" >/dev/null 2>&1 || true
+    launchctl load "$out" >/dev/null 2>&1 || \
+      echo "warn: launchctl load failed; plist written but not loaded" >&2
+  fi
+
+  _policy_log "continuous" "INSTALLED" "plist:$out" "{\"path\":\"$out\"}" >/dev/null 2>&1 || true
+  echo "installed: $out"
+  return 0
+}
+
+# continuous_uninstall — best-effort launchctl unload + rm plist (idempotent).
+continuous_uninstall() {
+  local dir out
+  dir="${ARK_LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
+  out="$dir/com.ark.continuous.plist"
+
+  if [[ ! -f "$out" ]]; then
+    echo "not installed: $out"
+    return 0
+  fi
+
+  if [[ -z "${ARK_LAUNCHAGENTS_DIR:-}" ]] && command -v launchctl >/dev/null 2>&1; then
+    launchctl unload "$out" >/dev/null 2>&1 || true
+  fi
+  rm -f "$out"
+  _policy_log "continuous" "UNINSTALLED" "plist:$out" "{\"path\":\"$out\"}" >/dev/null 2>&1 || true
+  echo "uninstalled: $out"
+  return 0
+}
+
+# continuous_status — print last tick, next tick estimate, recent decisions, daily tokens, PAUSE state.
+continuous_status() {
+  _continuous_refresh_paths
+
+  # PAUSE state
+  if [[ -f "$PAUSE_FILE" ]]; then
+    echo "PAUSE: ACTIVE ($PAUSE_FILE)"
+  else
+    echo "PAUSE: inactive"
+  fi
+
+  # Lock state
+  if [[ -d "$LOCK_DIR" ]]; then
+    echo "LOCK: held ($LOCK_DIR)"
+  else
+    echo "LOCK: free"
+  fi
+
+  local tick_min tick_sec
+  tick_min=$(policy_config_get continuous.tick_interval_min 15 2>/dev/null)
+  [[ -z "$tick_min" ]] && tick_min=15
+  [[ "$tick_min" =~ ^[0-9]+$ ]] || tick_min=15
+  tick_sec=$(( tick_min * 60 ))
+
+  # Last tick + recent decisions from policy.db
+  local dbp=""
+  if type db_path >/dev/null 2>&1; then
+    dbp="$(db_path 2>/dev/null)"
+  fi
+
+  local last_tick=""
+  if [[ -n "$dbp" ]] && [[ -f "$dbp" ]]; then
+    last_tick=$(sqlite3 "$dbp" \
+      "SELECT ts FROM decisions WHERE class='continuous' AND decision='TICK_COMPLETE' ORDER BY ts DESC, rowid DESC LIMIT 1;" \
+      2>/dev/null)
+  fi
+  if [[ -z "$last_tick" ]]; then
+    echo "Last tick: no ticks yet"
+    echo "Next tick: (after install + first run; interval=${tick_sec}s)"
+  else
+    echo "Last tick: $last_tick"
+    echo "Next tick (estimated): ~${tick_sec}s after last (interval ${tick_min}min)"
+  fi
+
+  # Daily token usage (mirror continuous_check_daily_cap)
+  local cap used
+  cap=$(policy_config_get continuous.daily_token_cap 50000 2>/dev/null)
+  [[ -z "$cap" ]] && cap=50000
+  used=0
+  if [[ -n "$dbp" ]] && [[ -f "$dbp" ]]; then
+    used=$(sqlite3 "$dbp" \
+      "SELECT IFNULL(SUM(json_extract(context,'\$.tokens')),0) FROM decisions WHERE class IN ('budget','dispatch','dispatcher') AND ts >= date('now','start of day');" \
+      2>/dev/null)
+    [[ -z "$used" ]] && used=0
+  fi
+  used=${used%.*}
+  [[ "$used" =~ ^[0-9]+$ ]] || used=0
+  echo "Daily tokens: $used / $cap"
+
+  # Recent decisions (last 10)
+  echo ""
+  echo "Recent decisions (last 10, class:continuous):"
+  if [[ -n "$dbp" ]] && [[ -f "$dbp" ]]; then
+    sqlite3 -separator '  |  ' "$dbp" \
+      "SELECT ts, decision, reason FROM decisions WHERE class='continuous' ORDER BY ts DESC, rowid DESC LIMIT 10;" \
+      2>/dev/null \
+      | sed 's/^/  /'
+  else
+    echo "  (no policy.db found at: ${dbp:-<unset>})"
+  fi
+  return 0
+}
+
+# continuous_pause — touch PAUSE file (idempotent kill-switch).
+continuous_pause() {
+  _continuous_refresh_paths
+  mkdir -p "$(dirname "$PAUSE_FILE")" 2>/dev/null
+  : > "$PAUSE_FILE"
+  _policy_log "continuous" "USER_PAUSED" "manual_pause" "{\"pause_file\":\"$PAUSE_FILE\"}" >/dev/null 2>&1 || true
+  echo "paused: $PAUSE_FILE"
+  return 0
+}
+
+# continuous_resume — remove PAUSE file (idempotent).
+continuous_resume() {
+  _continuous_refresh_paths
+  rm -f "$PAUSE_FILE"
+  _policy_log "continuous" "USER_RESUMED" "manual_resume" "{\"pause_file\":\"$PAUSE_FILE\"}" >/dev/null 2>&1 || true
+  echo "resumed: $PAUSE_FILE"
+  return 0
+}
 # === END SECTION: subcommands ===
 
 # === continuous_self_test — 12+ assertions in mktemp -d isolation ===
@@ -1057,11 +1264,215 @@ EOF
   _ct_assert_eq "$ap_after" "$ap_idem" "Test 21b: idempotent (PAUSE present → no-op)"
   rm -f "$PAUSE_FILE"
 
-  # Test 22: Sentinel byte boundaries — subcommands section (07-04 area) unchanged.
-  # Use first-occurrence-only awk (the test code below references the marker
-  # strings in comments, which would otherwise confuse a /pat/,/pat/ range).
+  # Test 22: Sentinel discipline — health-monitor section (07-03 area) byte-identical
+  # to the 07-03 baseline. Plan 07-04 must not have touched the health-monitor block.
   echo ""
-  echo "Test 22: Subcommands sentinel section untouched (07-04 area)"
+  echo "Test 22: Health-monitor sentinel section untouched (07-03 area)"
+  local hm_md5
+  hm_md5=$(awk '
+    /^[[:space:]]*# === SECTION: health-monitor \(Plan 07-03\) ===$/ { f=1 }
+    f { print }
+    /^[[:space:]]*# === END SECTION: health-monitor ===$/ { if (f) { exit } }
+  ' "$self_path" | md5 -q 2>/dev/null \
+    || awk '
+    /^[[:space:]]*# === SECTION: health-monitor \(Plan 07-03\) ===$/ { f=1 }
+    f { print }
+    /^[[:space:]]*# === END SECTION: health-monitor ===$/ { if (f) { exit } }
+  ' "$self_path" | md5sum | awk '{print $1}')
+  # Baseline captured at end of Plan 07-03 (frozen for 07-04 sentinel discipline).
+  if [[ "$hm_md5" == "ac04e8a3c807a58332d4c49c44416b9d" ]]; then
+    _ct_assert_eq "1" "1" "Test 22: health-monitor sentinel md5 byte-identical to 07-03 baseline"
+  else
+    _ct_assert_eq "1" "0" "Test 22: health-monitor sentinel md5 baseline (got: $hm_md5)"
+  fi
+
+  # ----------------------------------------------------------------------
+  # Plan 07-04 subcommand tests (Tests 23-34)
+  # All run with ARK_LAUNCHAGENTS_DIR override so real ~/Library/LaunchAgents
+  # is never touched. Real-LaunchAgents invariant verified via before/after ls.
+  # ----------------------------------------------------------------------
+  local LA_BEFORE LA_AFTER REAL_LA="$HOME/Library/LaunchAgents/com.ark.continuous.plist"
+  if [[ -f "$REAL_LA" ]]; then
+    LA_BEFORE=$(md5 -q "$REAL_LA" 2>/dev/null || md5sum "$REAL_LA" 2>/dev/null | awk '{print $1}')
+  else
+    LA_BEFORE="ABSENT"
+  fi
+
+  local LA_DIR="$TMP/LaunchAgents"
+  mkdir -p "$LA_DIR"
+  export ARK_LAUNCHAGENTS_DIR="$LA_DIR"
+  local PLIST_PATH="$LA_DIR/com.ark.continuous.plist"
+
+  # Test 23: continuous_install writes plist to override dir
+  echo ""
+  echo "Test 23: continuous_install writes plist (ARK_LAUNCHAGENTS_DIR override)"
+  continuous_install >/dev/null 2>&1
+  if [[ -f "$PLIST_PATH" ]]; then
+    _ct_assert_eq "1" "1" "Test 23: plist written to override dir"
+  else
+    _ct_assert_eq "1" "0" "Test 23: plist written to override dir"
+  fi
+
+  # Test 24: plutil -lint validates the plist (best-effort; skip if plutil absent)
+  echo ""
+  echo "Test 24: plutil -lint validates generated plist"
+  if command -v plutil >/dev/null 2>&1; then
+    if plutil -lint "$PLIST_PATH" 2>/dev/null | grep -q "OK"; then
+      _ct_assert_eq "1" "1" "Test 24: plutil -lint OK"
+    else
+      _ct_assert_eq "1" "0" "Test 24: plutil -lint reports errors"
+    fi
+  else
+    echo "  ⏭  Test 24: skipped (plutil not available); falling back to grep"
+    if grep -q '<key>Label</key>' "$PLIST_PATH" && grep -q 'com.ark.continuous' "$PLIST_PATH"; then
+      _ct_assert_eq "1" "1" "Test 24: plist contains required keys (plutil-fallback)"
+    else
+      _ct_assert_eq "1" "0" "Test 24: plist missing required keys"
+    fi
+  fi
+
+  # Test 25: plist content invariants — Label, StartInterval, ProgramArguments
+  echo ""
+  echo "Test 25: plist content invariants"
+  if grep -q '<string>com.ark.continuous</string>' "$PLIST_PATH"; then
+    _ct_assert_eq "1" "1" "Test 25: Label=com.ark.continuous"
+  else
+    _ct_assert_eq "1" "0" "Test 25: Label=com.ark.continuous"
+  fi
+  if grep -q '<key>StartInterval</key>' "$PLIST_PATH" && grep -q '<integer>900</integer>' "$PLIST_PATH"; then
+    _ct_assert_eq "1" "1" "Test 25a: StartInterval=900 (default 15min)"
+  else
+    _ct_assert_eq "1" "0" "Test 25a: StartInterval=900"
+  fi
+  if grep -q '<string>--tick</string>' "$PLIST_PATH"; then
+    _ct_assert_eq "1" "1" "Test 25b: ProgramArguments includes --tick"
+  else
+    _ct_assert_eq "1" "0" "Test 25b: ProgramArguments includes --tick"
+  fi
+
+  # Test 26: idempotency — second install produces byte-identical plist
+  echo ""
+  echo "Test 26: continuous_install is idempotent"
+  local md5_first md5_second
+  md5_first=$(md5 -q "$PLIST_PATH" 2>/dev/null || md5sum "$PLIST_PATH" 2>/dev/null | awk '{print $1}')
+  continuous_install >/dev/null 2>&1
+  md5_second=$(md5 -q "$PLIST_PATH" 2>/dev/null || md5sum "$PLIST_PATH" 2>/dev/null | awk '{print $1}')
+  _ct_assert_eq "$md5_first" "$md5_second" "Test 26: plist md5 unchanged across two installs"
+
+  # Test 27: continuous_uninstall removes the plist
+  echo ""
+  echo "Test 27: continuous_uninstall removes plist"
+  continuous_uninstall >/dev/null 2>&1
+  if [[ ! -f "$PLIST_PATH" ]]; then
+    _ct_assert_eq "1" "1" "Test 27: plist removed by uninstall"
+  else
+    _ct_assert_eq "1" "0" "Test 27: plist still present after uninstall"
+  fi
+
+  # Test 28: continuous_uninstall is idempotent (no plist → returns 0)
+  echo ""
+  echo "Test 28: continuous_uninstall is idempotent"
+  continuous_uninstall >/dev/null 2>&1
+  rc=$?
+  _ct_assert_eq "0" "$rc" "Test 28: uninstall with no plist returns 0"
+
+  # Test 29: continuous_pause creates PAUSE file
+  echo ""
+  echo "Test 29: continuous_pause creates PAUSE"
+  rm -f "$PAUSE_FILE"
+  continuous_pause >/dev/null 2>&1
+  if [[ -f "$PAUSE_FILE" ]]; then
+    _ct_assert_eq "1" "1" "Test 29: PAUSE file created"
+  else
+    _ct_assert_eq "1" "0" "Test 29: PAUSE file created"
+  fi
+  # Idempotent
+  continuous_pause >/dev/null 2>&1
+  if [[ -f "$PAUSE_FILE" ]]; then
+    _ct_assert_eq "1" "1" "Test 29a: continuous_pause idempotent"
+  else
+    _ct_assert_eq "1" "0" "Test 29a: continuous_pause idempotent"
+  fi
+
+  # Test 30: continuous_resume removes PAUSE file
+  echo ""
+  echo "Test 30: continuous_resume removes PAUSE"
+  continuous_resume >/dev/null 2>&1
+  if [[ ! -f "$PAUSE_FILE" ]]; then
+    _ct_assert_eq "1" "1" "Test 30: PAUSE file removed"
+  else
+    _ct_assert_eq "1" "0" "Test 30: PAUSE file removed"
+  fi
+  # Idempotent
+  continuous_resume >/dev/null 2>&1
+  rc=$?
+  _ct_assert_eq "0" "$rc" "Test 30a: continuous_resume idempotent (no PAUSE → 0)"
+
+  # Test 31: continuous_status with no ticks → "no ticks yet" message
+  echo ""
+  echo "Test 31: continuous_status — no ticks yet"
+  # Create a clean isolated DB region for this test to ensure no TICK_COMPLETE rows.
+  local STATUS_TMP="$TMP/status_isolated"
+  mkdir -p "$STATUS_TMP/observability"
+  local saved_ark_home="$ARK_HOME"
+  local saved_policy_db="$ARK_POLICY_DB"
+  export ARK_HOME="$STATUS_TMP"
+  export ARK_POLICY_DB="$STATUS_TMP/observability/policy.db"
+  _continuous_refresh_paths
+  if type db_init >/dev/null 2>&1; then
+    db_init >/dev/null 2>&1
+  fi
+  local status_out
+  status_out=$(continuous_status 2>&1)
+  if echo "$status_out" | grep -q "no ticks yet"; then
+    _ct_assert_eq "1" "1" "Test 31: status reports 'no ticks yet' on empty DB"
+  else
+    _ct_assert_eq "1" "0" "Test 31: status missing 'no ticks yet' (got: $status_out)"
+  fi
+  if echo "$status_out" | grep -q "PAUSE:"; then
+    _ct_assert_eq "1" "1" "Test 31a: status includes PAUSE state line"
+  else
+    _ct_assert_eq "1" "0" "Test 31a: status missing PAUSE line"
+  fi
+  if echo "$status_out" | grep -q "Daily tokens:"; then
+    _ct_assert_eq "1" "1" "Test 31b: status includes Daily tokens line"
+  else
+    _ct_assert_eq "1" "0" "Test 31b: status missing Daily tokens line"
+  fi
+  # Restore
+  export ARK_HOME="$saved_ark_home"
+  export ARK_POLICY_DB="$saved_policy_db"
+  _continuous_refresh_paths
+
+  # Test 32: continuous_status with synthetic TICK_COMPLETE rows → shows last tick
+  echo ""
+  echo "Test 32: continuous_status — with TICK_COMPLETE row"
+  _policy_log "continuous" "TICK_COMPLETE" "p:1 f:0 m:0" "null" >/dev/null 2>&1
+  status_out=$(continuous_status 2>&1)
+  if echo "$status_out" | grep -q "Last tick:" && ! echo "$status_out" | grep -q "no ticks yet"; then
+    _ct_assert_eq "1" "1" "Test 32: status shows actual last tick timestamp"
+  else
+    _ct_assert_eq "1" "0" "Test 32: status missing last tick (got: $status_out)"
+  fi
+  if echo "$status_out" | grep -q "Recent decisions"; then
+    _ct_assert_eq "1" "1" "Test 32a: status includes Recent decisions section"
+  else
+    _ct_assert_eq "1" "0" "Test 32a: status missing Recent decisions"
+  fi
+
+  # Test 33: ARK_LAUNCHAGENTS_DIR override honored — real LaunchAgents untouched
+  echo ""
+  echo "Test 33: Real ~/Library/LaunchAgents/com.ark.continuous.plist invariant"
+  if [[ -f "$REAL_LA" ]]; then
+    LA_AFTER=$(md5 -q "$REAL_LA" 2>/dev/null || md5sum "$REAL_LA" 2>/dev/null | awk '{print $1}')
+  else
+    LA_AFTER="ABSENT"
+  fi
+  _ct_assert_eq "$LA_BEFORE" "$LA_AFTER" "Test 33: real ~/Library/LaunchAgents plist md5 unchanged"
+
+  # Test 34: Subcommands sentinel md5 baseline (frozen for downstream waves 07-05+)
+  echo ""
+  echo "Test 34: Subcommands sentinel md5 baseline (frozen by 07-04)"
   local sub_md5
   sub_md5=$(awk '
     /^# === SECTION: subcommands \(Plan 07-04\) ===$/ { f=1 }
@@ -1073,14 +1484,13 @@ EOF
     f { print }
     /^# === END SECTION: subcommands ===$/ { if (f) { exit } }
   ' "$self_path" | md5sum | awk '{print $1}')
-  # Expected baseline captured at Plan 07-03 implementation time
-  # (07-02 set the section content; this hash freezes it for downstream waves).
-  if [[ "$sub_md5" == "2df5ee72a693c4d81ac7bd760a955ab5" ]]; then
-    _ct_assert_eq "1" "1" "Test 22: subcommands sentinel md5 byte-identical to 07-02 baseline"
+  if [[ "$sub_md5" == "a4c678dac5f66e6988e50edb47a3491f" ]]; then
+    _ct_assert_eq "1" "1" "Test 34: subcommands sentinel md5 = 07-04 baseline"
   else
-    _ct_assert_eq "1" "0" "Test 22: subcommands sentinel md5 baseline (got: $sub_md5)"
+    _ct_assert_eq "1" "0" "Test 34: subcommands sentinel md5 (got: $sub_md5)"
   fi
 
+  unset ARK_LAUNCHAGENTS_DIR
   unset ARK_PORTFOLIO_ROOT
 
   # Cleanup
@@ -1093,6 +1503,7 @@ EOF
   echo "RESULT: $pass/$total pass"
   if [[ "$fail" -eq 0 ]]; then
     echo "✅ ALL ARK-CONTINUOUS CORE TESTS PASSED"
+    echo "✅ ALL CONTINUOUS-SUBCOMMANDS TESTS PASSED"
     return 0
   else
     echo "❌ $fail/$total tests failed"
@@ -1111,12 +1522,32 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       continuous_tick
       exit $?
       ;;
+    --install|install)
+      continuous_install
+      exit $?
+      ;;
+    --uninstall|uninstall)
+      continuous_uninstall
+      exit $?
+      ;;
+    --status|status)
+      continuous_status
+      exit $?
+      ;;
+    --pause|pause)
+      continuous_pause
+      exit $?
+      ;;
+    --resume|resume)
+      continuous_resume
+      exit $?
+      ;;
     "")
       # Default: silent no-op (lib sourceable without side effects)
       :
       ;;
     *)
-      echo "Usage: $0 [--self-test|--tick]" >&2
+      echo "Usage: $0 [--self-test|--tick|--install|--uninstall|--status|--pause|--resume]" >&2
       exit 2
       ;;
   esac
