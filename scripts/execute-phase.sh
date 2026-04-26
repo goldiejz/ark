@@ -378,6 +378,31 @@ except: pass
   # Clean up prompt file
   rm -f "$prompt_file"
 
+  # === Task 2b: policy_dispatch_failure for empty-output / all-dispatchers-down ===
+  # claude-session branch already returned 2 above (handled separately) — excluded here.
+  if [[ -z "$output" && "$chosen_dispatcher" != "claude-session" ]]; then
+    local _failure_verdict="RETRY_NEXT_TIER"
+    if type policy_dispatch_failure >/dev/null 2>&1; then
+      _failure_verdict=$(policy_dispatch_failure "$task_desc" 0)
+    fi
+    log "Policy dispatch failure verdict: $_failure_verdict"
+    case "$_failure_verdict" in
+      ESCALATE_REPEATED)
+        if type ark_escalate >/dev/null 2>&1; then
+          ark_escalate repeated-failure \
+            "execute-phase: all dispatchers unavailable" \
+            "Task: $task_desc"$'\n'"Chosen dispatcher: $chosen_dispatcher"$'\n'"Tier: $current_tier" >/dev/null 2>&1 || true
+        fi
+        ;;
+      RETRY_NEXT_TIER|SELF_HEAL)
+        # Caller's existing self-heal logic (or 02-06b layered retry) handles next step.
+        :
+        ;;
+    esac
+    err "Dispatch failed for task: $task_desc (verdict=$_failure_verdict)"
+    return 1
+  fi
+
   # Save output for audit
   echo "$output" > "$PHASE_DIR/task-$task_num-output.md"
 
