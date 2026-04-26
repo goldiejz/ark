@@ -171,18 +171,34 @@ Constraints:
 - Include error handling and proper types
 - If you need to add dependencies, list them but don't run npm install"
 
+  # Helper: cross-platform timeout (macOS doesn't have 'timeout', uses 'gtimeout' from coreutils)
+  local TIMEOUT_CMD=""
+  if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="timeout 180"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="gtimeout 180"
+  fi
+
   # Try Codex first
   local output=""
   if command -v codex >/dev/null 2>&1; then
     log "Dispatching to Codex..."
-    output=$(echo "$prompt" | timeout 180 codex exec - 2>&1 </dev/null || echo "")
+    if [[ -n "$TIMEOUT_CMD" ]]; then
+      output=$(echo "$prompt" | $TIMEOUT_CMD codex exec - 2>&1 </dev/null || echo "")
+    else
+      output=$(echo "$prompt" | codex exec - 2>&1 </dev/null || echo "")
+    fi
   fi
 
   # Fall back to Gemini
   if [[ -z "$output" ]] || [[ "$output" == *"hit your usage limit"* ]] || [[ "$output" == *"quota"* ]]; then
     if command -v gemini >/dev/null 2>&1; then
       log "Codex unavailable, falling back to Gemini..."
-      output=$(echo "$prompt" | timeout 180 gemini -p - 2>&1 || echo "")
+      if [[ -n "$TIMEOUT_CMD" ]]; then
+        output=$(echo "$prompt" | $TIMEOUT_CMD gemini -p - 2>&1 || echo "")
+      else
+        output=$(echo "$prompt" | gemini -p - 2>&1 || echo "")
+      fi
     fi
   fi
 
