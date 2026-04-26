@@ -16,7 +16,7 @@
 
 set -euo pipefail
 
-VAULT_PATH="${AUTOMATION_BRAIN_PATH:-$HOME/vaults/automation-brain}"
+VAULT_PATH="${ARK_HOME:-${AUTOMATION_BRAIN_PATH:-$HOME/vaults/ark}}"
 COMMAND="${1:-default}"
 PROJECT_DIR="$(pwd)"
 
@@ -41,9 +41,17 @@ cmd_sync() {
 
 cmd_status() {
   print_header
+  # Support both legacy 'brain-snapshot' and new 'ark-snapshot' dir names during transition
+  local manifest=""
   if [[ -f "$PROJECT_DIR/.parent-automation/ark-snapshot/SNAPSHOT-MANIFEST.json" ]]; then
+    manifest="$PROJECT_DIR/.parent-automation/ark-snapshot/SNAPSHOT-MANIFEST.json"
+  elif [[ -f "$PROJECT_DIR/.parent-automation/brain-snapshot/SNAPSHOT-MANIFEST.json" ]]; then
+    manifest="$PROJECT_DIR/.parent-automation/brain-snapshot/SNAPSHOT-MANIFEST.json"
+  fi
+
+  if [[ -n "$manifest" ]]; then
     echo -e "${GREEN}✅ Snapshot present${NC}"
-    cat "$PROJECT_DIR/.parent-automation/ark-snapshot/SNAPSHOT-MANIFEST.json" | head -20
+    cat "$manifest" | head -20
   else
     echo -e "${YELLOW}⚠️  No snapshot yet. Run: ark sync${NC}"
   fi
