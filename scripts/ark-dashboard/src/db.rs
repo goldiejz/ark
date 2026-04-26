@@ -65,6 +65,27 @@ impl Db {
         rows.collect()
     }
 
+    /// Recent lesson promotions: rows with class IN ('self_improve','lesson_promote')
+    /// in the last `seconds_ago` seconds, newest-first.
+    pub fn lesson_promotions_recent(&self, seconds_ago: u64) -> Result<Vec<Decision>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT ts, class, decision, substr(reason,1,80) FROM decisions \
+             WHERE class IN ('self_improve','lesson_promote') \
+               AND ts > datetime('now', ?1) \
+             ORDER BY ts DESC LIMIT 50",
+        )?;
+        let modifier = format!("-{} seconds", seconds_ago);
+        let rows = stmt.query_map([modifier], |r| {
+            Ok(Decision {
+                ts: r.get(0)?,
+                class: r.get(1)?,
+                decision: r.get(2)?,
+                reason: r.get(3).unwrap_or_default(),
+            })
+        })?;
+        rows.collect()
+    }
+
     pub fn class_counts_since(&self, seconds_ago: u64) -> Result<HashMap<String, usize>> {
         let mut stmt = self.conn.prepare(
             "SELECT class, COUNT(*) FROM decisions \
@@ -83,6 +104,60 @@ impl Db {
         }
         Ok(out)
     }
+}
+
+/// Newest immediate subdirectory of `<project_root>/.planning/phases/` by mtime.
+/// Returns `(basename, mtime_secs)` or None if dir missing/empty.
+pub fn newest_phase_dir(project_root: &Path) -> Option<(String, u64)> {
+    let phases = project_root.join(".planning").join("phases");
+    let entries = std::fs::read_dir(&phases).ok()?;
+    let mut best: Option<(String, u64)> = None;
+    for e in entries.flatten() {
+        if !e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let mtime = match e
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+        {
+            Some(m) => m,
+            None => continue,
+        };
+        let name = e.file_name().to_string_lossy().to_string();
+        match &best {
+            Some((_, m)) if *m >= mtime => {}
+            _ => best = Some((name, mtime)),
+        }
+    }
+    best
+}
+
+/// Newest `.md` file in `<vault_path>/observability/verification-reports/`.
+pub fn latest_verify_report(vault_path: &Path) -> Option<PathBuf> {
+    let dir = vault_path.join("observability").join("verification-reports");
+    let entries = std::fs::read_dir(&dir).ok()?;
+    let mut best: Option<(PathBuf, u64)> = None;
+    for e in entries.flatten() {
+        let path = e.path();
+        if path.extension().map(|s| s == "md").unwrap_or(false) {
+            if let Some(ts) = e
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+            {
+                match &best {
+                    Some((_, m)) if *m >= ts => {}
+                    _ => best = Some((path, ts)),
+                }
+            }
+        }
+    }
+    best.map(|(p, _)| p)
 }
 
 /// Walk `portfolio_root` depth-3 looking for `.planning/STATE.md`.
@@ -283,6 +358,65 @@ mod tests {
         assert!(p.last_activity_secs > 0);
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn newest_phase_dir_picks_latest() {
+        let tmp = std::env::temp_dir().join(format!("ark-dash-phases-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let phases = tmp.join(".planning").join("phases");
+        std::fs::create_dir_all(phases.join("01-foo")).unwrap();
+        // Sleep briefly so mtimes differ on coarse-resolution filesystems.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::create_dir_all(phases.join("02-bar")).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::create_dir_all(phases.join("03-baz")).unwrap();
+
+        let got = newest_phase_dir(&tmp).expect("expected Some");
+        assert_eq!(got.0, "03-baz");
+        assert!(got.1 > 0);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn latest_verify_report_picks_newest_md() {
+        let tmp = std::env::temp_dir().join(format!("ark-dash-vrep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let dir = tmp.join("observability").join("verification-reports");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("20260101-000000.md"), "# old\n").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(dir.join("20260202-000000.md"), "# new\n").unwrap();
+        // A non-.md file should be ignored.
+        std::fs::write(dir.join("ignored.txt"), "not me\n").unwrap();
+
+        let got = latest_verify_report(&tmp).expect("expected Some");
+        assert!(got.file_name().unwrap().to_string_lossy().ends_with("20260202-000000.md"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn lesson_promotions_recent_filters_by_class_and_window() {
+        let tmp = std::env::temp_dir().join(format!("ark-dash-prom-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        {
+            let c = Connection::open(&tmp).unwrap();
+            c.execute_batch(
+                "CREATE TABLE decisions (ts TEXT, class TEXT, decision TEXT, reason TEXT);
+                 INSERT INTO decisions VALUES (datetime('now','-1 days'),'lesson_promote','PROMOTED','x');
+                 INSERT INTO decisions VALUES (datetime('now','-2 days'),'self_improve','PROMOTED','y');
+                 INSERT INTO decisions VALUES (datetime('now','-30 days'),'lesson_promote','OLD','z');
+                 INSERT INTO decisions VALUES (datetime('now','-1 hours'),'budget','irrelevant','q');",
+            )
+            .unwrap();
+        }
+        let db = Db::open_readonly(&tmp).unwrap();
+        let rows = db.lesson_promotions_recent(7 * 86_400).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.class == "lesson_promote" || r.class == "self_improve"));
+        let _ = std::fs::remove_file(&tmp);
     }
 
     #[test]
