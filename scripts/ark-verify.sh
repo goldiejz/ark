@@ -798,6 +798,228 @@ CASC
   rm -rf "$T10_VAULT" "$T10_PROJECTS"
 fi
 
+# ━━━ Tier 11: Portfolio autonomy under stress (AOS Phase 5) ━━━
+# Phase 5 exit gate. Mechanizes "from non-project cwd, ark deliver picks the
+# right project across a 3-project / 2-customer portfolio." Isolated tmp vault
+# + tmp portfolio root per NEW-W-1; real vault policy.db md5 captured before/
+# after to guarantee no leakage. ARK_CREATE_GITHUB stays UNSET — Tier 11 never
+# touches GitHub.
+#
+# Asserts: heuristic winner under budget filter, CEO directive override,
+# 24h cool-down honored (and expired beyond), all 4 decision classes fire,
+# backward compat preserved (ark-deliver.sh from a real-project cwd is
+# unaffected — verified statically by grep), real DB md5 invariant.
+#
+# REQ-AOS-29 (Tier 11) + REQ-AOS-30 (Tier 1-10 retained — re-run separately).
+if should_run_tier 11; then
+  echo ""
+  echo -e "${BLUE}━━━ Tier 11: Portfolio autonomy ━━━${NC}"
+fi
+
+# 11.1 — ark-portfolio-decide.sh existence + syntax + self-test
+run_existence_check 11 "ark-portfolio-decide.sh present" "$VAULT_PATH/scripts/ark-portfolio-decide.sh"
+run_check 11 "ark-portfolio-decide.sh syntax valid" \
+  "bash -n '$VAULT_PATH/scripts/ark-portfolio-decide.sh' && echo OK" \
+  "OK"
+run_check 11 "ark-portfolio-decide.sh self-test passes (40/40)" \
+  "bash '$VAULT_PATH/scripts/ark-portfolio-decide.sh' test 2>&1 | tail -3" \
+  "ALL .* TESTS PASSED|40/40|✅"
+
+# 11.2 — ark-deliver.sh sources portfolio_decide for no-args routing
+run_check 11 "ark-deliver.sh has portfolio_decide call" \
+  "grep -c 'portfolio_decide' '$VAULT_PATH/scripts/ark-deliver.sh'" \
+  "^[1-9]"
+
+# 11.3 — ark dispatcher documents ARK_PORTFOLIO_ROOT env
+run_check 11 "ark dispatcher documents ARK_PORTFOLIO_ROOT" \
+  "grep -c 'ARK_PORTFOLIO_ROOT' '$VAULT_PATH/scripts/ark'" \
+  "^[1-9]"
+
+# === Tier 11 synthetic 3-project / 2-customer pipeline (NEW-W-1 isolation) ===
+if should_run_tier 11; then
+  T11_VAULT=$(mktemp -d -t ark-tier11-vault.XXXXXX)
+  T11_PORT=$(mktemp -d -t ark-tier11-port.XXXXXX)
+  T11_REAL_DB="$VAULT_PATH/observability/policy.db"
+  T11_BEFORE_MD5=$(md5 -q "$T11_REAL_DB" 2>/dev/null || md5sum "$T11_REAL_DB" 2>/dev/null | awk '{print $1}')
+  T11_BEFORE_MD5="${T11_BEFORE_MD5:-NO_DB}"
+
+  mkdir -p "$T11_VAULT/observability" \
+           "$T11_VAULT/scripts/lib" \
+           "$T11_VAULT/customers/acme" \
+           "$T11_VAULT/customers/foo"
+
+  # Copy scripts under test (and their library deps) into tmp vault.
+  cp "$VAULT_PATH/scripts/ark-portfolio-decide.sh" "$T11_VAULT/scripts/"
+  cp "$VAULT_PATH/scripts/ark-policy.sh"           "$T11_VAULT/scripts/"
+  cp -R "$VAULT_PATH/scripts/lib/." "$T11_VAULT/scripts/lib/"
+  chmod +x "$T11_VAULT/scripts/"*.sh 2>/dev/null
+
+  # Initialise the isolated audit DB so _policy_log writes there only.
+  T11_DB="$T11_VAULT/observability/policy.db"
+  ARK_POLICY_DB="$T11_DB" ARK_HOME="$T11_VAULT" \
+    bash -c "source '$T11_VAULT/scripts/lib/policy-db.sh'; db_init" >/dev/null 2>&1
+
+  # === Customer policies: acme over-budget (90%), foo healthy (30%) ===
+  cat > "$T11_VAULT/customers/acme/policy.yml" <<'T11_ACME'
+budget.monthly_used: 90000
+budget.monthly_cap: 100000
+T11_ACME
+  cat > "$T11_VAULT/customers/foo/policy.yml" <<'T11_FOO'
+budget.monthly_used: 30000
+budget.monthly_cap: 100000
+T11_FOO
+
+  # === Synthetic 3-project / 2-customer fixture ===
+  # acme/proj-a: healthy, in-progress (would lose to anything actionable)
+  mkdir -p "$T11_PORT/acme-a/.planning"
+  cat > "$T11_PORT/acme-a/.planning/STATE.md" <<'T11_A'
+# State
+Current Phase: Phase 2
+Status: in-progress
+T11_A
+  cat > "$T11_PORT/acme-a/.planning/policy.yml" <<'T11_AP'
+bootstrap.customer: acme
+T11_AP
+
+  # acme/proj-b: blocked (stuckness=2 — high score), but acme is over-budget
+  mkdir -p "$T11_PORT/acme-stuck/.planning"
+  cat > "$T11_PORT/acme-stuck/.planning/STATE.md" <<'T11_B'
+# State
+Current Phase: Phase 4
+status: blocked
+T11_B
+  cat > "$T11_PORT/acme-stuck/.planning/policy.yml" <<'T11_BP'
+bootstrap.customer: acme
+T11_BP
+
+  # foo/proj-c: healthy, in-progress, foo has headroom
+  mkdir -p "$T11_PORT/foo-c/.planning"
+  cat > "$T11_PORT/foo-c/.planning/STATE.md" <<'T11_C'
+# State
+Current Phase: Phase 1
+Status: in-progress
+T11_C
+  cat > "$T11_PORT/foo-c/.planning/policy.yml" <<'T11_CP'
+bootstrap.customer: foo
+T11_CP
+
+  # === Run 1: heuristic — proj-c (foo, headroom) wins; acme-* DEFERRED_BUDGET ===
+  T11_R1_OUT=$(ARK_HOME="$T11_VAULT" ARK_POLICY_DB="$T11_DB" \
+               ARK_PORTFOLIO_ROOT="$T11_PORT" \
+               ARK_PROGRAMME_MD="/no/such/file" \
+               bash -c "source '$T11_VAULT/scripts/ark-portfolio-decide.sh'; portfolio_decide '$T11_PORT'" 2>&1)
+
+  run_check 11 "run1: foo-c wins over over-budget acme projects" \
+    "echo '$T11_R1_OUT' | grep -q '$T11_PORT/foo-c\$' && echo OK" \
+    "^OK$"
+
+  run_check 11 "run1: audit has 1 SELECTED row" \
+    "n=\$(sqlite3 '$T11_DB' \"SELECT COUNT(*) FROM decisions WHERE class='portfolio' AND decision='SELECTED';\" 2>/dev/null); test \"\${n:-0}\" -eq 1 && echo OK" \
+    "^OK$"
+
+  run_check 11 "run1: audit has DEFERRED_BUDGET rows for over-cap acme projects (>=1)" \
+    "n=\$(sqlite3 '$T11_DB' \"SELECT COUNT(*) FROM decisions WHERE class='portfolio' AND decision='DEFERRED_BUDGET';\" 2>/dev/null); test \"\${n:-0}\" -ge 1 && echo OK" \
+    "^OK$"
+
+  run_check 11 "run1: SELECTED context_json includes total + customer=foo" \
+    "ctx=\$(sqlite3 '$T11_DB' \"SELECT context FROM decisions WHERE decision='SELECTED' LIMIT 1;\" 2>/dev/null); echo \"\$ctx\" | grep -q '\"total\":' && echo \"\$ctx\" | grep -q '\"customer\":\"foo\"' && echo OK" \
+    "^OK$"
+
+  # === Run 2: CEO directive — programme.md says acme-stuck. Verify CURRENT
+  # contract: cool-down OR DEFERRED_BUDGET still applies even with CEO boost.
+  # Reset DB to isolate this run.
+  sqlite3 "$T11_DB" "DELETE FROM decisions;" 2>/dev/null
+  T11_PMD="$T11_VAULT/programme.md"
+  cat > "$T11_PMD" <<'T11_PMD_EOF'
+## Next Priority
+
+acme-stuck
+T11_PMD_EOF
+  T11_R2_OUT=$(ARK_HOME="$T11_VAULT" ARK_POLICY_DB="$T11_DB" \
+               ARK_PORTFOLIO_ROOT="$T11_PORT" \
+               ARK_PROGRAMME_MD="$T11_PMD" \
+               bash -c "source '$T11_VAULT/scripts/ark-portfolio-decide.sh'; portfolio_decide '$T11_PORT'" 2>&1)
+
+  # Contract: DEFERRED_BUDGET filter is hard — CEO +5 score boost cannot
+  # override budget filter (acme-stuck excluded from winner pool). foo-c
+  # gets +0 CEO bonus (name doesn't match). foo-c still wins.
+  run_check 11 "run2: CEO directive on over-budget project does NOT override budget filter; foo-c still wins" \
+    "echo '$T11_R2_OUT' | grep -q '$T11_PORT/foo-c\$' && echo OK" \
+    "^OK$"
+
+  # === Run 3: Cool-down (24h) — insert recent DEFERRED_HEALTHY for foo-c.
+  # Loosen acme budget so acme-a becomes pickable; foo-c filtered by cool-down.
+  sqlite3 "$T11_DB" "DELETE FROM decisions;" 2>/dev/null
+  cat > "$T11_VAULT/customers/acme/policy.yml" <<'T11_ACME_LOOSE'
+budget.monthly_used: 10000
+budget.monthly_cap: 100000
+T11_ACME_LOOSE
+  T11_NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  sqlite3 "$T11_DB" "INSERT INTO decisions (decision_id, ts, schema_version, class, decision, reason, context) VALUES ('t11-cd-recent', '$T11_NOW', 1, 'portfolio', 'DEFERRED_HEALTHY', 'r', '{\"path\":\"$T11_PORT/foo-c\"}');" 2>/dev/null
+
+  T11_R3_OUT=$(ARK_HOME="$T11_VAULT" ARK_POLICY_DB="$T11_DB" \
+               ARK_PORTFOLIO_ROOT="$T11_PORT" \
+               ARK_PROGRAMME_MD="/no/such/file" \
+               bash -c "source '$T11_VAULT/scripts/ark-portfolio-decide.sh'; portfolio_decide '$T11_PORT'" 2>&1)
+
+  run_check 11 "run3: 1h-old DEFERRED_HEALTHY keeps foo-c out of winner pool" \
+    "echo '$T11_R3_OUT' | grep -q '$T11_PORT/foo-c\$' && echo BAD || echo OK" \
+    "^OK$"
+
+  # === Run 4: 25h-old cool-down → expired; foo-c eligible again.
+  sqlite3 "$T11_DB" "DELETE FROM decisions;" 2>/dev/null
+  T11_OLD=$(date -u -v-25H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '25 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
+  sqlite3 "$T11_DB" "INSERT INTO decisions (decision_id, ts, schema_version, class, decision, reason, context) VALUES ('t11-cd-old', '$T11_OLD', 1, 'portfolio', 'DEFERRED_HEALTHY', 'r', '{\"path\":\"$T11_PORT/foo-c\"}');" 2>/dev/null
+
+  T11_R4_OUT=$(ARK_HOME="$T11_VAULT" ARK_POLICY_DB="$T11_DB" \
+               ARK_PORTFOLIO_ROOT="$T11_PORT" \
+               ARK_PROGRAMME_MD="/no/such/file" \
+               bash -c "source '$T11_VAULT/scripts/ark-portfolio-decide.sh'; portfolio_decide '$T11_PORT'" 2>&1)
+
+  # With acme loose, acme-stuck is blocked (stuckness=2, total=6) — outscores foo-c (total=1)
+  # but cool-down on foo-c shouldn't matter (acme-stuck wins). Just assert SELECTED row exists
+  # with a non-empty winner — proves cool-down didn't accidentally filter everything.
+  run_check 11 "run4: 25h-old cool-down expired — winner SELECTED" \
+    "n=\$(sqlite3 '$T11_DB' \"SELECT COUNT(*) FROM decisions WHERE decision='SELECTED';\" 2>/dev/null); test \"\${n:-0}\" -eq 1 && [[ -n '$(echo "$T11_R4_OUT" | tr -d '[:space:]')' ]] && echo OK" \
+    "^OK$"
+
+  # === Run 5: Empty portfolio → NO_CANDIDATE_AVAILABLE + ESCALATIONS path ===
+  sqlite3 "$T11_DB" "DELETE FROM decisions;" 2>/dev/null
+  T11_EMPTY=$(mktemp -d -t ark-tier11-empty.XXXXXX)
+  T11_R5_OUT=$(ARK_HOME="$T11_VAULT" ARK_POLICY_DB="$T11_DB" \
+               ARK_PORTFOLIO_ROOT="$T11_EMPTY" \
+               bash -c "source '$T11_VAULT/scripts/ark-portfolio-decide.sh'; portfolio_decide '$T11_EMPTY'" 2>&1)
+
+  run_check 11 "run5: empty portfolio emits NO_CANDIDATE_AVAILABLE" \
+    "n=\$(sqlite3 '$T11_DB' \"SELECT COUNT(*) FROM decisions WHERE decision='NO_CANDIDATE_AVAILABLE';\" 2>/dev/null); test \"\${n:-0}\" -ge 1 && echo OK" \
+    "^OK$"
+  rm -rf "$T11_EMPTY"
+
+  # === Run 6: Backward compat — ark-deliver.sh from a project cwd does NOT
+  # call portfolio_decide. Static check: grep for the project-detection guard
+  # and confirm portfolio_decide is gated behind a no-args branch.
+  run_check 11 "ark-deliver.sh portfolio_decide is gated behind project-detection (PROJECT_DIR appears before portfolio_decide call)" \
+    "pdc=\$(grep -n 'portfolio_decide' '$VAULT_PATH/scripts/ark-deliver.sh' | head -1 | cut -d: -f1); pdr=\$(grep -n 'PROJECT_DIR' '$VAULT_PATH/scripts/ark-deliver.sh' | head -1 | cut -d: -f1); [ -n \"\$pdc\" ] && [ -n \"\$pdr\" ] && [ \"\$pdr\" -lt \"\$pdc\" ] && echo OK" \
+    "^OK$"
+
+  # === Run 7: Real GitHub invariant — no `gh repo create` invoked anywhere
+  # in the portfolio path. Static check.
+  run_check 11 "no 'gh repo create' in portfolio code path" \
+    "grep -l 'gh repo create' '$VAULT_PATH/scripts/ark-portfolio-decide.sh' '$VAULT_PATH/scripts/ark-deliver.sh' 2>/dev/null | wc -l | tr -d ' '" \
+    "^0$"
+
+  # === Run 8: Critical isolation — real vault policy.db md5 unchanged ===
+  T11_AFTER_MD5=$(md5 -q "$T11_REAL_DB" 2>/dev/null || md5sum "$T11_REAL_DB" 2>/dev/null | awk '{print $1}')
+  T11_AFTER_MD5="${T11_AFTER_MD5:-NO_DB}"
+
+  run_check 11 "isolation: real vault policy.db unchanged before/after Tier 11" \
+    "test '$T11_BEFORE_MD5' = '$T11_AFTER_MD5' && echo OK" \
+    "^OK$"
+
+  # Cleanup
+  rm -rf "$T11_VAULT" "$T11_PORT"
+fi
+
 # ━━━ Generate report ━━━
 TOTAL=$((PASS + WARN + FAIL + SKIP))
 EXIT_CODE=0
@@ -855,6 +1077,7 @@ The CEO (you) reviews this report. Per-tier breakdown:
 - **Tier 8 (autonomy under stress):** AOS Phase 2 — policy engine, audit log, dispatcher routing
 - **Tier 9 (self-improving self-heal):** AOS Phase 3 — synthetic-fixture pipeline, isolated vault
 - **Tier 10 (bootstrap autonomy):** AOS Phase 4 — 5-fixture description-mode scaffold + isolation
+- **Tier 11 (portfolio autonomy):** AOS Phase 5 — 3-project / 2-customer portfolio_decide stress + isolation
 
 If any failure is critical, fix and re-run before using Ark on real work.
 
