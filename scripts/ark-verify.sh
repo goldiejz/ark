@@ -287,6 +287,153 @@ run_check 7 "Legacy ark layout finds PLAN.md tasks" \
   "^1$"
 rm -rf "$TMP_LEGACY"
 
+# ━━━ Tier 8: Autonomy under stress (AOS) ━━━
+# Phase 2 exit gate. Verifies CONTEXT.md acceptance criterion #5: simulated
+# quota+budget exhaustion conditions; pipeline proceeds without input;
+# Tier 1–7 unchanged.
+#
+# Call-graph trace for the isolated dedup test (NEW-W-1):
+#   dispatch_task (BLACK tier)
+#     └─ policy_budget_decision           → 1 class:budget log line (AUTO_RESET)
+#         └─ ark-budget.sh --reset
+#             └─ python3 zeros phase_used
+#             └─ check_and_notify
+#                 └─ notify_tier_change(BLACK, GREEN)   (post-zero new_tier=GREEN)
+#                     └─ new_tier != BLACK → skips _budget_apply_policy_on_black
+#                     └─ NO additional class:budget log line
+#   Expected DELTA = 1
+#
+# Sentinel-cost observability path (NEW-W-3):
+#   The session-handoff branch in execute-phase.sh::dispatch_task calls:
+#     ark-budget.sh --record <est_tokens> "claude-session-handoff:<task_id>"
+#   --record appends an entry to PROJECT_DIR/.planning/budget.json's history
+#   array with model="claude-session-handoff:<task_id>". (It does NOT write to
+#   $VAULT_PATH/observability/budget-events.jsonl — only tier_change events go
+#   there.) The sentinel test therefore inspects budget.json's history for the
+#   literal "claude-session-handoff" string.
+if should_run_tier 8; then
+  echo ""
+  echo -e "${BLUE}━━━ Tier 8: Autonomy under stress ━━━${NC}"
+fi
+
+run_existence_check 8 "ark-policy.sh present" "$VAULT_PATH/scripts/ark-policy.sh"
+run_existence_check 8 "policy-config.sh present" "$VAULT_PATH/scripts/lib/policy-config.sh"
+run_existence_check 8 "ark-escalations.sh present" "$VAULT_PATH/scripts/ark-escalations.sh"
+
+run_check 8 "ark-policy.sh syntax valid" \
+  "bash -n $VAULT_PATH/scripts/ark-policy.sh && echo OK" \
+  "OK"
+
+run_check 8 "ark-escalations.sh syntax valid" \
+  "bash -n $VAULT_PATH/scripts/ark-escalations.sh && echo OK" \
+  "OK"
+
+run_check 8 "ark-policy self-test passes" \
+  "bash $VAULT_PATH/scripts/ark-policy.sh test 2>&1 | tail -3" \
+  "ALL POLICY TESTS PASSED"
+
+run_check 8 "self-heal.sh has --retry mode + 3 layer entries" \
+  "grep -cE '_self_heal_layer_(enriched|escalate_model|escalate_queue)|--retry' $VAULT_PATH/scripts/self-heal.sh" \
+  "^[4-9]$|^[1-9][0-9]+$"
+
+run_check 8 "Audit log schema_version=1 + decision_id (16-hex suffix)" \
+  "bash -c 'TLOG=/tmp/tier8-schema-\$\$.jsonl; POLICY_LOG=\$TLOG ARK_HOME=$VAULT_PATH bash -c \"export POLICY_LOG=\$TLOG; source $VAULT_PATH/scripts/ark-policy.sh; POLICY_LOG=\$TLOG; policy_budget_decision 0 50000 0 1000000 >/dev/null\"; tail -1 \$TLOG; rm -f \$TLOG'" \
+  "schema_version\":1.*decision_id\":\"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}\""
+
+# NEW-B-2 verification: class:self_heal lines in the global log must contain decision_id.
+# Mirrors the existing class:budget assertion from 02-06b.
+run_check 8 "All class:self_heal lines have decision_id (NEW-B-2)" \
+  "bash -c 'log=$VAULT_PATH/observability/policy-decisions.jsonl; if [[ ! -f \"\$log\" ]]; then echo NO_LOG_OK; exit 0; fi; bad=\$(grep \"class\\\":\\\"self_heal\\\"\" \"\$log\" 2>/dev/null | grep -cv decision_id); echo \"bad=\$bad\"'" \
+  "^bad=0$|NO_LOG_OK"
+
+run_check 8 "Budget auto-reset when monthly headroom" \
+  "bash -c 'source $VAULT_PATH/scripts/ark-policy.sh; policy_budget_decision 60000 50000 60000 1000000'" \
+  "^AUTO_RESET$"
+
+run_check 8 "Budget escalates at 95%+ monthly" \
+  "bash -c 'source $VAULT_PATH/scripts/ark-policy.sh; policy_budget_decision 60000 50000 960000 1000000'" \
+  "^ESCALATE_MONTHLY_CAP$"
+
+# W-4 split: SPECIFIC dispatcher-route assertions (one value each — no tolerance regex).
+
+run_check 8 "Dispatcher route — active session: returns EXACTLY claude-session (W-4)" \
+  "bash -c 'unset ANTHROPIC_API_KEY; CLAUDE_PROJECT_DIR=/tmp/fake-session-dir ARK_FORCE_QUOTA_CODEX=true ARK_FORCE_QUOTA_GEMINI=true ARK_HOME=$VAULT_PATH bash -c \"source $VAULT_PATH/scripts/ark-policy.sh; policy_dispatcher_route standard GREEN\"'" \
+  "^claude-session$"
+
+run_check 8 "Dispatcher route — no session, no API key, quota stubs: EXACTLY regex-fallback (W-4)" \
+  "bash -c 'unset ANTHROPIC_API_KEY CLAUDE_PROJECT_DIR; ARK_FORCE_QUOTA_CODEX=true ARK_FORCE_QUOTA_GEMINI=true ARK_HOME=$VAULT_PATH bash -c \"unset CLAUDE_PROJECT_DIR; source $VAULT_PATH/scripts/ark-policy.sh; policy_dispatcher_route standard BLACK\"'" \
+  "^regex-fallback$"
+
+run_check 8 "Zero-task phase returns SKIP_LOGGED" \
+  "bash -c 'source $VAULT_PATH/scripts/ark-policy.sh; policy_zero_tasks /tmp/fake 0'" \
+  "^SKIP_LOGGED$"
+
+run_check 8 "Dispatch failure escalates after max retries" \
+  "bash -c 'source $VAULT_PATH/scripts/ark-policy.sh; policy_dispatch_failure /tmp/err 3'" \
+  "^ESCALATE_REPEATED$"
+
+run_check 8 "policy_load_config emits 4 KEY=VALUE lines" \
+  "bash -c 'source $VAULT_PATH/scripts/ark-policy.sh; policy_load_config | wc -l | tr -d \" \"'" \
+  "^4$"
+
+run_check 8 "Delivery-path scripts have zero unintentional read prompts" \
+  "grep -nE 'read -[pr] ' $VAULT_PATH/scripts/ark-deliver.sh $VAULT_PATH/scripts/ark-team.sh $VAULT_PATH/scripts/execute-phase.sh $VAULT_PATH/scripts/ark-budget.sh $VAULT_PATH/scripts/self-heal.sh $VAULT_PATH/scripts/ark-escalations.sh $VAULT_PATH/scripts/ark-policy.sh 2>/dev/null | grep -v 'AOS: intentional' | wc -l | tr -d ' '" \
+  "^0$"
+
+run_check 8 "Delivery-path scripts source ark-policy.sh" \
+  "bash -c 'count=0; for f in ark-deliver.sh ark-team.sh execute-phase.sh ark-budget.sh self-heal.sh; do grep -qE \"source.*ark-policy\\.sh|ark-policy\\.sh\\\"\" \"$VAULT_PATH/scripts/\$f\" && count=\$((count+1)); done; echo \"count=\$count\"'" \
+  "^count=5$"
+
+run_check 8 "Observer pattern manual-gate-hit registered" \
+  "python3 -c \"import json; d=json.load(open('$VAULT_PATH/observability/observer/patterns.json')); ids=[p.get('id') for p in (d.get('patterns', d) if isinstance(d, dict) else d)]; print('PRESENT' if 'manual-gate-hit' in ids else 'MISSING')\"" \
+  "^PRESENT$"
+
+run_check 8 "ark escalations subcommand dispatches" \
+  "$VAULT_PATH/scripts/ark escalations --list 2>&1 | head -1" \
+  "Ark Escalations|No open escalations|No escalations queue|ESC-"
+
+# NEW-W-1 ISOLATED dedup test:
+# Use a tmp VAULT_PATH so concurrent writes against the global log can't poison the delta.
+# Copies ark-policy.sh + lib + ark-budget.sh + ark-context.sh + execute-phase.sh into
+# a tmp dir with empty observability/policy-decisions.jsonl. Documented call-graph result:
+# DELTA=1 (notify_tier_change(BLACK,GREEN) post-zero does NOT re-enter _budget_apply_policy_on_black
+# because the new_tier guard is `== BLACK`). The check accepts (1|2) per plan; observed=1.
+run_check 8 "Audit log: ISOLATED budget-decision count per BLACK-tier dispatch (NEW-W-1)" \
+  "bash $VAULT_PATH/scripts/tier8-helpers/dedup-test.sh '$VAULT_PATH'" \
+  "^DELTA=(1|2)$"
+
+# NEW-W-3 sentinel observability:
+# The session-handoff branch records via `ark-budget.sh --record <tokens> claude-session-handoff:<id>`.
+# That writes to PROJECT_DIR/.planning/budget.json's history array (NOT budget-events.jsonl).
+# This check synthetically dispatches a session-handoff and asserts budget.json gained
+# >=1 history entry with model containing 'claude-session-handoff'. If the --record signature
+# silently fails (NEW-W-3 root cause), the count would be 0 and this check fails.
+run_check 8 "Session-handoff sentinel cost recorded in budget.json history (NEW-W-3)" \
+  "bash $VAULT_PATH/scripts/tier8-helpers/sentinel-test.sh '$VAULT_PATH'" \
+  "^SENTINEL_DELTA=[1-9][0-9]*$"
+
+# NEW-W-4 entropy stress: 100 _policy_log calls produce 100 distinct decision_ids.
+run_check 8 "decision_id uniqueness under stress: 100 calls, 100 distinct (NEW-W-4)" \
+  "bash $VAULT_PATH/scripts/tier8-helpers/stress-test.sh '$VAULT_PATH'" \
+  "^UNIQUE=100$"
+
+# End-to-end: simulated quota stubs do NOT block on `read`. Two complementary checks:
+#   (a) under active session → claude-session
+#   (b) without session and quotas exhausted → regex-fallback (no read prompt)
+run_check 8 "End-to-end: quota stubs + active session → claude-session (no input)" \
+  "bash -c 'unset ANTHROPIC_API_KEY; CLAUDE_PROJECT_DIR=/tmp/fake-session-dir ARK_FORCE_QUOTA_CODEX=true ARK_FORCE_QUOTA_GEMINI=true ARK_HOME=$VAULT_PATH bash -c \"source $VAULT_PATH/scripts/ark-policy.sh; policy_dispatcher_route standard GREEN\" </dev/null'" \
+  "^claude-session$"
+
+# Second end-to-end leg uses BLACK tier (which short-circuits to regex-fallback
+# inside policy_dispatcher_route BEFORE the session-detection branch). We cannot
+# test the "no-session" path via env-unset while running inside a Claude session
+# because ark-context.sh --primary detects the parent process regardless of
+# CLAUDE_PROJECT_DIR. BLACK-tier short-circuit covers the same observable goal:
+# routing returns regex-fallback under stressed conditions without prompting.
+run_check 8 "End-to-end: BLACK tier + quota stubs → regex-fallback (no input)" \
+  "bash -c 'unset ANTHROPIC_API_KEY; ARK_FORCE_QUOTA_CODEX=true ARK_FORCE_QUOTA_GEMINI=true ARK_HOME=$VAULT_PATH bash -c \"source $VAULT_PATH/scripts/ark-policy.sh; policy_dispatcher_route standard BLACK\" </dev/null'" \
+  "^regex-fallback$"
+
 # ━━━ Generate report ━━━
 TOTAL=$((PASS + WARN + FAIL + SKIP))
 EXIT_CODE=0
