@@ -2,26 +2,40 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: "Phase 6.5 (AOS: CEO Dashboard)"
+current_phase: "Phase 7 (AOS: Continuous Operation)"
 status: complete
-last_updated: "2026-04-26T19:52:27Z"
+last_updated: "2026-04-26T21:15:00Z"
 progress:
   total_phases: 10
-  completed_phases: 7
-  total_plans: 49
-  completed_plans: 47
+  completed_phases: 8
+  total_plans: 57
+  completed_plans: 55
   percent: 96
 ---
 
 # Ark — Implementation State
 
-**Last updated:** 2026-04-26T19:52:27Z
-**Current Phase:** Phase 6.5 (AOS: CEO Dashboard)
+**Last updated:** 2026-04-26T21:15:00Z
+**Current Phase:** Phase 7 (AOS: Continuous Operation)
 **Status:** complete
 
-## Plan-count audit (2026-04-26, drift reconciliation, Phase 6.5 close)
+## 🎉 AOS Journey Terminal (2026-04-26)
 
-Plan 06-03 ran a `gsd-tools` state recompute that overwrote 05-07's hand-set frontmatter values (5/7, 41/41 → 4/7, 37/39). 06-06 reconciled by counting the disk truth. 06.5-07 (this plan) re-reconciles after Phase 6.5 added 8 plans:
+**Phase 7 closes the AOS journey.** All 8 AOS phases now complete: Phase 0 (Bootstrap) → Phase 2 (Delivery Autonomy) → Phase 2.5 (SQLite substrate) → Phase 3 (Self-Improving Self-Heal) → Phase 4 (Bootstrap Autonomy) → Phase 5 (Portfolio Autonomy) → Phase 6 (Cross-Customer Learning) → Phase 6.5 (CEO Dashboard) → Phase 7 (Continuous Operation).
+
+Original ROADMAP.md North Star achieved: **user authors intent in markdown, walks away, returns to find projects shipped** (or true blockers escalated via async ESCALATIONS.md queue). The CEO loop is closed.
+
+**Next phase pointer:** Phase 8 (Production Hardening + Reporting). Phase 8 is **OUTSIDE the AOS journey** — it is post-AOS productionization (multi-machine vault sync, disaster recovery drills, investor/customer report templates, stress-test under load), not autonomy. The autonomy contract is fixed at the close of Phase 7.
+
+**Phase 8 backlog (carry-forward from Phase 7):**
+
+- **Tier 8 baseline 24/25** — pre-existing failure on `ark escalations subcommand dispatches` test pattern; predates Phase 6.5; Phase 7 did not touch this scope. Phase 8 should investigate and restore to 25/25.
+- **Unauthorized goldiejz/acme-sd repo** — leftover from Phase 4 Plan 04-04 first-smoke-test (unguarded `gh repo create` block; defect fixed in same plan via `ARK_CREATE_GITHUB` env gate, default off). User must manually delete via `gh repo delete goldiejz/acme-sd --yes` (after granting `delete_repo` scope) or GitHub web UI.
+- **Phase 1 (GSD Integration) 3 of 10 ROADMAP items unchecked** — STRUCTURE.md GSD/Ark relationship doc, employees-registry gsd-planner/gsd-verifier additions, doc refresh. Lives outside AOS scope; can ship independently of Phase 8.
+
+## Plan-count audit (2026-04-26, drift reconciliation, Phase 7 close)
+
+Plan 06-03 ran a `gsd-tools` state recompute that overwrote 05-07's hand-set frontmatter values. 06-06 reconciled by counting disk truth. 06.5-07 re-reconciled after Phase 6.5 added 8 plans. 07-08 (this plan) reconciles after Phase 7 added 8 more plans (07-01..07-08), closing the AOS journey:
 
 | Phase | PLAN.md files | SUMMARY.md files | Status |
 |-------|--------------:|-----------------:|--------|
@@ -33,10 +47,11 @@ Plan 06-03 ran a `gsd-tools` state recompute that overwrote 05-07's hand-set fro
 | Phase 4 — Bootstrap Autonomy | 8 | 8 | complete |
 | Phase 5 — Portfolio Autonomy | 7 | 7 | complete |
 | Phase 6 — Cross-Customer Learning | 6 | 6 | complete |
-| Phase 6.5 — CEO Dashboard | 8 | 8 | complete (after this plan) |
-| **Totals** | **49 PLAN.md** | **47 SUMMARY.md** | — |
+| Phase 6.5 — CEO Dashboard | 8 | 8 | complete |
+| Phase 7 — Continuous Operation | 8 | 8 | complete (after this plan) |
+| **Totals** | **57 PLAN.md** | **55 SUMMARY.md** | — |
 
-`total_plans: 49` reflects the 49 PLAN.md files on disk (41 prior + 8 from Phase 6.5: 06.5-01..08). `completed_plans: 47` reflects the 47 SUMMARY.md files (Phase 1 PLAN.md + Phase 2.5 PLAN.md remain SUMMARY-less; their narratives are folded into Phase 3+ closure docs). `total_phases: 10` enumerates Phases 0,1,2,2.5,3,4,5,6,6.5,7. `completed_phases: 7` counts Phases 0,2,2.5,3,4,5,6,6.5 marked complete in this file (Phase 1 is in-progress and excluded; if Phase 1 closes, this count moves to 8).
+Disk-counted via `for d in .planning/phases/*/; do ls "$d"*PLAN.md "$d"*SUMMARY.md 2>/dev/null | wc -l; done`. `total_plans: 57` reflects the 57 PLAN.md files on disk (49 prior + 8 from Phase 7: 07-01..08). `completed_plans: 55` reflects the 55 SUMMARY.md files (Phase 1 PLAN.md + Phase 2.5 PLAN.md remain SUMMARY-less; their narratives are folded into Phase 3+ closure docs). `total_phases: 10` enumerates Phases 0,1,2,2.5,3,4,5,6,6.5,7. `completed_phases: 8` counts Phases 0,2,2.5,3,4,5,6,6.5,7 marked complete in this file (Phase 1 remains in-progress and excluded; if Phase 1 closes, this count moves to 9 — but Phase 1 is outside the AOS journey, see "AOS Journey Terminal" header above).
 
 ## Phase 0 — Bootstrap (complete)
 
@@ -182,6 +197,31 @@ access from the local machine (and trivial LAN access via `--bind 0.0.0.0`).
 
 **Tier 8 deferred item (Phase 7 backlog):** Tier 8 baseline regressed from 25/25 to 24/25 prior to Phase 6.5 (the pre-existing failure is `ark escalations subcommand dispatches`, unrelated to the dashboard). Per scope-boundary discipline, 06.5-06 logged this as a deviation rather than fixing it in this phase. Phase 7 should investigate and restore.
 
-## Phase 7 — Future
+## Phase 7 — AOS: Continuous Operation (complete)
 
-Next per `.planning/ROADMAP.md`: **Phase 7 — Continuous Operation** (cron-driven INBOX consumption; user writes intent in markdown, Ark consumes the queue and ships; weekly digest; health monitor; Tier 14 verify). Phase 7 will consume the Phase 6.5 dashboard for async progress visibility, and should also investigate/repair the Tier 8 pre-existing failure noted above.
+See `.planning/phases/07-continuous-operation/`
+
+**Goal:** Cron-driven INBOX consumption. User authors intent in markdown at `~/vaults/ark/INBOX/`; macOS launchd daemon ticks every 15 min, parses intent, dispatches to `ark create` / `ark deliver --phase N` / `ark deliver` (portfolio) / `ark promote-lessons`, archives processed files to `INBOX/processed/<UTC-date>/`, escalates failures via `ESCALATIONS.md`, writes weekly digest. **Closes the AOS journey.**
+
+**Exit gate:** Tier 14 28/28 + Tier 7/9/10/11/12/13 retained — confirmed `bash scripts/ark-verify.sh --tier 7` 14/14, `--tier 9` 20/20, `--tier 10` 22/22, `--tier 11` 16/16, `--tier 12` 24/24, `--tier 13` 30/30, `--tier 14` 28/28. Tier 8 baseline 24/25 carried forward (pre-existing failure on `ark escalations subcommand dispatches`, predates Phase 6.5; deferred to Phase 8 backlog per CONTEXT.md scope boundary).
+
+| Plan  | Outcome |
+|-------|---------|
+| 07-01 | `scripts/lib/inbox-parser.sh` — frontmatter parser + intent dispatcher; sourceable Bash 3 lib; 16/16 self-test |
+| 07-02 | `scripts/ark-continuous.sh` — main daemon: tick + `process_inbox` + mkdir-lock + daily token cap; 12/12 self-test; 8 audit-class decisions wired (`TICK_START`, `TICK_COMPLETE`, `INBOX_DISPATCH`, `INBOX_PROCESSED`, `INBOX_FAILED`, `INBOX_MALFORMED`, `LOCK_CONTENDED`, `DAILY_CAP_HIT`) |
+| 07-03 | `continuous_health_monitor` — stuck-phase detection (24h STATE.md mtime + 24h no-commits) + 3-tick consecutive escalation (60-min window, 24h dedupe per project+phase) + auto-pause on 3 consecutive failure-ticks (`STUCK_PHASE_DETECTED`, `STUCK_ESCALATED`, `AUTO_PAUSE_3_FAIL`, `PAUSE_ACTIVE` audit classes) |
+| 07-04 | `continuous_install` / `uninstall` / `status` / `pause` / `resume` subcommand bodies + atomic plist generator (`com.ark.continuous.plist`); `ARK_LAUNCHAGENTS_DIR` test override for hermetic Tier 14 plist generation |
+| 07-05 | `scripts/ark::cmd_continuous` dispatcher arm: 6 subcommands (install / uninstall / status / pause / resume / tick) as pure pass-through to `ark-continuous.sh`; help text updated |
+| 07-06 | `scripts/ark-weekly-digest.sh` — 6-section aggregator (projects shipped, phases completed, escalations, lesson promotions, budget burn, dashboard URL) + standalone `com.ark.weekly-digest.plist` (Sunday 09:00 local, independent cron); `WEEKLY_DIGEST_WRITTEN` audit class |
+| 07-07 | Tier 14 verify suite (28 checks): 3-intent INBOX lifecycle (resume + new-phase + promote-lessons) + 3 safety rails (PAUSE / DAILY_CAP_HIT / LOCK_CONTENDED) + `plutil -lint` plist validation + weekly-digest 6-section assertion + `read -p` regression sweep across 3 continuous-path scripts + real-vault md5 invariants (`policy.db`, `ESCALATIONS.md`, `universal-patterns.md`, `anti-patterns.md`) + real `~/Library/LaunchAgents` md5 invariants (test runs use `ARK_LAUNCHAGENTS_DIR` override) |
+| 07-08 | REQ-AOS-40..48 minted (this plan); STATE.md Phase 7 close + plan-count drift reconciliation + AOS journey terminal note + Phase 8 backlog (Tier 8 24/25 carry-forward, goldiejz/acme-sd repo, Phase 1 unchecked items); ROADMAP.md Phase 7 checkboxes + AOS-complete banner; STRUCTURE.md AOS Continuous Operation Contract; SKILL.md Phase 7 posture + AOS-complete state |
+
+**AOS journey closed (Phases 2 → 2.5 → 3 → 4 → 5 → 6 → 6.5 → 7).** Original ROADMAP.md AOS goal achieved: user authors intent in markdown, walks away, returns to find projects shipped (or true blockers escalated via async ESCALATIONS.md queue). Phase 6.5 (CEO Dashboard) is read-only AOS visibility surface; Phase 7 (Continuous Operation) is the autonomy-loop closer. Phase 8 (Production Hardening) is post-AOS productionization, not autonomy.
+
+**Tier 8 deferred (Phase 8 backlog):** Tier 8 baseline 24/25 pre-existing failure (`ark escalations subcommand dispatches`, unrelated to continuous operation) carried forward from Phase 6.5. Phase 7 did not touch this scope (per CONTEXT.md out-of-scope boundary). Phase 8 should investigate and restore to 25/25.
+
+## Phase 8 — Future (post-AOS productionization)
+
+Next per `.planning/ROADMAP.md`: **Phase 8 — Production Hardening & Reporting**. Multi-machine vault sync verification, disaster-recovery drill (restore from backup, verify state), investor/customer report templates, cross-project portfolio analytics dashboard, stress-test continuous-operation daemon under load. **Phase 8 is OUTSIDE the AOS journey** — it productionizes the AOS contract that closed at Phase 7, but does not extend the autonomy contract itself.
+
+Phase 8 should also investigate/repair the Tier 8 pre-existing failure noted in the Phase 7 backlog above.

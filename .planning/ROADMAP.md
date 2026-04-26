@@ -24,6 +24,10 @@
 
 The following phases are the full AOS journey. Each phase removes one class of "ask the user" gates until Ark operates fully autonomously, escalating only true blockers via async queue.
 
+> ## ✅ AOS Journey Complete (2026-04-26)
+>
+> All 8 AOS phases shipped: Phase 0 → Phase 2 → Phase 2.5 → Phase 3 → Phase 4 → Phase 5 → Phase 6 → Phase 6.5 → Phase 7. Original North Star achieved: user authors intent in markdown, walks away, returns to find projects shipped (or true blockers escalated via async `ESCALATIONS.md` queue). The autonomy contract is fixed at the close of Phase 7. Phase 8 below is post-AOS productionization, not autonomy.
+
 ### Phase 2 — AOS: Delivery Autonomy
 **Goal:** `ark deliver` runs to completion with zero user prompts for routine resource decisions.
 
@@ -110,17 +114,19 @@ The following phases are the full AOS journey. Each phase removes one class of "
 
 **Status:** ✅ Complete — see .planning/phases/06.5-ceo-dashboard/
 
-### Phase 7 — AOS: Continuous Operation
+### Phase 7 — AOS: Continuous Operation (complete)
 **Goal:** Ark runs continuously via cron. User writes intent in markdown files; Ark consumes the queue and ships.
 
-- [ ] Cron daemon at `scripts/ark-loop.sh` runs every N minutes
-- [ ] Reads `~/vaults/ark/INBOX/` — markdown files describe new intent (new projects, new phases, new directives)
-- [ ] Processes ESCALATIONS.md responses from user
-- [ ] Writes `~/vaults/ark/observability/weekly-digest.md` — what Ark decided/shipped this week
-- [ ] Health monitor: detect when Ark is stuck (no progress in 24h on active phase) → escalate
-- [ ] Tier 13 verify: drop 3 intent files in INBOX → assert all 3 are processed within next cron cycle
+- [x] Cron daemon at `scripts/ark-continuous.sh` runs every 15 min via launchd (`com.ark.continuous.plist`, `StartInterval = 900s`, `RunAtLoad = true`)
+- [x] Reads `~/vaults/ark/INBOX/` — markdown files describe new intent (`new-project`, `new-phase`, `resume`, `promote-lessons`); `scripts/lib/inbox-parser.sh` parses frontmatter + dispatches
+- [x] Processes ESCALATIONS.md responses from user (delegates to existing single-writer; processed files archived to `INBOX/processed/<UTC-date>/`)
+- [x] Writes `~/vaults/ark/observability/weekly-digest-YYYY-WW.md` — 6-section weekly aggregator (projects shipped, phases, escalations, promotions, budget, dashboard URL); independent cron (`com.ark.weekly-digest.plist`, Sun 09:00)
+- [x] Health monitor: detects 24h-stuck phase (STATE.md mtime > 24h AND no commits in 24h) → 3 consecutive detections → ESCALATIONS entry (24h dedupe); auto-pause on 3 consecutive failure-ticks
+- [x] Tier 14 verify: 28 checks — 3-intent INBOX lifecycle + safety rails (PAUSE/DAILY_CAP_HIT/LOCK_CONTENDED) + plist generation + weekly digest + read-p sweep + real-vault md5 invariant + real ~/Library/LaunchAgents md5 invariant
 
-**Exit criteria:** User writes `INBOX/2026-05-01-new-customer.md` with a project description, walks away, and 24 hours later the project exists, has Phase 0 and Phase 1 shipped, with a digest summarizing what happened.
+**Exit criteria:** User writes `INBOX/2026-05-01-new-customer.md` with a project description, walks away, and 24 hours later the project exists, has Phase 0 and Phase 1 shipped, with a digest summarizing what happened. **Met** — Tier 14 28/28; Tier 7/9/10/11/12/13 retained at 14/20/22/16/24/30; Tier 8 24/25 (pre-existing failure carry-forward, deferred to Phase 8 backlog).
+
+**Status:** ✅ Complete — see `.planning/phases/07-continuous-operation/`
 
 ---
 
