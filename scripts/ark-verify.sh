@@ -232,6 +232,61 @@ run_check 6 "Employee registry has roles" \
   "ls $VAULT_PATH/employees/*.json 2>/dev/null | wc -l" \
   "[1-9]"
 
+# ━━━ Tier 7: GSD compatibility ━━━
+if should_run_tier 7; then
+  echo ""
+  echo -e "${BLUE}━━━ Tier 7: GSD compatibility ━━━${NC}"
+fi
+run_existence_check 7 "Shared gsd-shape lib present" "$VAULT_PATH/scripts/lib/gsd-shape.sh"
+run_check 7 "gsd-shape lib syntax valid" \
+  "bash -n '$VAULT_PATH/scripts/lib/gsd-shape.sh' && echo OK" \
+  "OK"
+run_check 7 "normalize_phase_num handles decimals" \
+  "bash -c 'source $VAULT_PATH/scripts/lib/gsd-shape.sh; gsd_normalize_phase_num 1.5'" \
+  "^01\.5$"
+run_check 7 "normalize_phase_num pads single digits" \
+  "bash -c 'source $VAULT_PATH/scripts/lib/gsd-shape.sh; gsd_normalize_phase_num 2'" \
+  "^02$"
+run_check 7 "ark-deliver sources gsd-shape lib" \
+  "grep -c 'gsd-shape.sh' $VAULT_PATH/scripts/ark-deliver.sh" \
+  "[1-9]"
+run_check 7 "ark-team sources gsd-shape lib" \
+  "grep -c 'gsd-shape.sh' $VAULT_PATH/scripts/ark-team.sh" \
+  "[1-9]"
+run_check 7 "execute-phase sources gsd-shape lib" \
+  "grep -c 'gsd-shape.sh' $VAULT_PATH/scripts/execute-phase.sh" \
+  "[1-9]"
+
+GSD_TEST_PROJECT="$HOME/code/strategix-servicedesk"
+if [[ -d "$GSD_TEST_PROJECT/.planning/phases" ]]; then
+  run_check 7 "GSD project detected as GSD" \
+    "bash -c 'source $VAULT_PATH/scripts/lib/gsd-shape.sh; gsd_is_gsd_project \"$GSD_TEST_PROJECT\" && echo GSD'" \
+    "GSD"
+  run_check 7 "Phase 1.5 resolves to real GSD slug dir" \
+    "bash -c 'source $VAULT_PATH/scripts/lib/gsd-shape.sh; gsd_resolve_phase_dir 1.5 \"$GSD_TEST_PROJECT\"'" \
+    "phases/01\.5-"
+  run_check 7 "Phase 1.5 finds multi-plan files (>=2)" \
+    "bash -c 'source $VAULT_PATH/scripts/lib/gsd-shape.sh; d=\$(gsd_resolve_phase_dir 1.5 \"$GSD_TEST_PROJECT\"); gsd_find_plan_files \"\$d\" | wc -l'" \
+    "[2-9]|[1-9][0-9]"
+  run_check 7 "Phase 1.5 finds non-zero tasks across plans" \
+    "bash -c 'source $VAULT_PATH/scripts/lib/gsd-shape.sh; d=\$(gsd_resolve_phase_dir 1.5 \"$GSD_TEST_PROJECT\"); gsd_count_tasks \"\$d\"'" \
+    "^[1-9][0-9]*$"
+  run_check 7 "No sibling phase-1.5 dir created on GSD project" \
+    "[[ ! -d '$GSD_TEST_PROJECT/.planning/phase-1.5' ]] && echo NOSIB" \
+    "NOSIB"
+fi
+
+TMP_LEGACY="/tmp/ark-verify-legacy-$$"
+mkdir -p "$TMP_LEGACY/.planning/phase-2"
+echo "- [ ] task" > "$TMP_LEGACY/.planning/phase-2/PLAN.md"
+run_check 7 "Legacy ark layout (phase-N/PLAN.md) still resolves" \
+  "bash -c 'source $VAULT_PATH/scripts/lib/gsd-shape.sh; gsd_resolve_phase_dir 2 \"$TMP_LEGACY\"'" \
+  "phase-2$"
+run_check 7 "Legacy ark layout finds PLAN.md tasks" \
+  "bash -c 'source $VAULT_PATH/scripts/lib/gsd-shape.sh; gsd_count_tasks \"$TMP_LEGACY/.planning/phase-2\"'" \
+  "^1$"
+rm -rf "$TMP_LEGACY"
+
 # ━━━ Generate report ━━━
 TOTAL=$((PASS + WARN + FAIL + SKIP))
 EXIT_CODE=0
