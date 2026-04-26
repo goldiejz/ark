@@ -179,28 +179,34 @@ Constraints:
     TIMEOUT_CMD="gtimeout 180"
   fi
 
-  # Try Codex first
+  # Try Codex first — write prompt to temp file, pass as stdin via redirection
+  local prompt_file="/tmp/brain-codex-prompt-$$.txt"
+  echo "$prompt" > "$prompt_file"
+
   local output=""
   if command -v codex >/dev/null 2>&1; then
     log "Dispatching to Codex..."
     if [[ -n "$TIMEOUT_CMD" ]]; then
-      output=$(echo "$prompt" | $TIMEOUT_CMD codex exec - 2>&1 </dev/null || echo "")
+      output=$($TIMEOUT_CMD codex exec - < "$prompt_file" 2>&1 || echo "")
     else
-      output=$(echo "$prompt" | codex exec - 2>&1 </dev/null || echo "")
+      output=$(codex exec - < "$prompt_file" 2>&1 || echo "")
     fi
   fi
 
   # Fall back to Gemini
-  if [[ -z "$output" ]] || [[ "$output" == *"hit your usage limit"* ]] || [[ "$output" == *"quota"* ]]; then
+  if [[ -z "$output" ]] || [[ "$output" == *"No prompt"* ]] || [[ "$output" == *"hit your usage limit"* ]] || [[ "$output" == *"quota"* ]]; then
     if command -v gemini >/dev/null 2>&1; then
       log "Codex unavailable, falling back to Gemini..."
       if [[ -n "$TIMEOUT_CMD" ]]; then
-        output=$(echo "$prompt" | $TIMEOUT_CMD gemini -p - 2>&1 || echo "")
+        output=$($TIMEOUT_CMD gemini -p - < "$prompt_file" 2>&1 || echo "")
       else
-        output=$(echo "$prompt" | gemini -p - 2>&1 || echo "")
+        output=$(gemini -p - < "$prompt_file" 2>&1 || echo "")
       fi
     fi
   fi
+
+  # Clean up prompt file
+  rm -f "$prompt_file"
 
   # Last resort: Haiku via API
   if [[ -z "$output" ]] || [[ "$output" == *"quota"* ]]; then
