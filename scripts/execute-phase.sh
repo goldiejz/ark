@@ -20,9 +20,12 @@ PROJECT_DIR="${1:?project dir required}"
 PHASE_NUM="${2:?phase number required}"
 
 VAULT_PATH="${ARK_HOME:-$HOME/vaults/ark}"
-PHASE_DIR="$PROJECT_DIR/.planning/phase-$PHASE_NUM"
-PLAN_FILE="$PHASE_DIR/PLAN.md"
+
+# Resolve phase dir respecting GSD layout (phases/NN-slug/) or legacy (phase-N/)
+source "$VAULT_PATH/scripts/lib/gsd-shape.sh"
+PHASE_DIR=$(gsd_resolve_phase_dir "$PHASE_NUM" "$PROJECT_DIR")
 CONTEXT_FILE="$PHASE_DIR/.context-$$.md"
+mkdir -p "$PHASE_DIR" 2>/dev/null
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -117,16 +120,21 @@ build_context() {
   } > "$CONTEXT_FILE"
 }
 
-# === Parse tasks from PLAN.md ===
+# === Parse tasks from ALL plan files (GSD multi-plan or Ark single PLAN.md) ===
 parse_tasks() {
-  if [[ ! -f "$PLAN_FILE" ]]; then
-    err "No PLAN.md found at $PLAN_FILE"
+  local plans
+  plans=$(gsd_find_plan_files "$PHASE_DIR")
+  if [[ -z "$plans" ]]; then
+    err "No plan files found in $PHASE_DIR"
     return 1
   fi
 
-  # Extract checkbox tasks: "- [ ] Task description"
-  grep -E "^[[:space:]]*-[[:space:]]+\[[[:space:]xX]\]" "$PLAN_FILE" | \
-    sed -E 's/^[[:space:]]*-[[:space:]]+\[[[:space:]xX]\][[:space:]]+//' || true
+  # Iterate plan files in sorted order; extract unchecked tasks from each.
+  while IFS= read -r pf; do
+    [[ -z "$pf" ]] && continue
+    grep -E "^[[:space:]]*-[[:space:]]+\[[[:space:]xX]\]" "$pf" 2>/dev/null | \
+      sed -E 's/^[[:space:]]*-[[:space:]]+\[[[:space:]xX]\][[:space:]]+//' || true
+  done <<< "$plans"
 }
 
 # === Dispatch a single task to Codex ===
@@ -473,12 +481,7 @@ main() {
     exit 1
   fi
 
-  if [[ ! -f "$PLAN_FILE" ]]; then
-    err "No plan: $PLAN_FILE"
-    exit 1
-  fi
-
-  log "Executing Phase $PHASE_NUM tasks for $(basename "$PROJECT_DIR")"
+  log "Executing Phase $PHASE_NUM tasks for $(basename "$PROJECT_DIR") (phase dir: $PHASE_DIR)"
 
   local tasks
   tasks=$(parse_tasks)
