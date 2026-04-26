@@ -164,6 +164,51 @@ artifact_has_real_content() {
   [[ $(wc -l < "$artifact" 2>/dev/null | tr -d ' ') -gt 3 ]]
 }
 
+# === Resolve phase directory: respect GSD's existing shape ===
+# GSD supports decimal phases (1.5), slugged dirs (phase-1-core-slice),
+# and lives at .planning/<phase-dir>/. Ark must NOT create a sibling
+# directory if a GSD phase already exists for that number.
+resolve_phase_dir() {
+  local phase_num="$1"
+  local planning_root="$PROJECT_DIR/.planning"
+
+  # 1. Exact match: .planning/phase-N/
+  if [[ -d "$planning_root/phase-$phase_num" ]]; then
+    echo "$planning_root/phase-$phase_num"
+    return 0
+  fi
+
+  # 2. Decimal match: .planning/phase-N.X/ (closest to N)
+  local decimal_match
+  decimal_match=$(ls -1d "$planning_root/phase-${phase_num}."* 2>/dev/null | head -1)
+  if [[ -n "$decimal_match" ]]; then
+    echo "$decimal_match"
+    return 0
+  fi
+
+  # 3. Slugged match: .planning/phase-N-anything/
+  local slug_match
+  slug_match=$(ls -1d "$planning_root/phase-${phase_num}-"* 2>/dev/null | head -1)
+  if [[ -n "$slug_match" ]]; then
+    echo "$slug_match"
+    return 0
+  fi
+
+  # 4. GSD alternate shape: .planning/phases/N-slug/
+  if [[ -d "$planning_root/phases" ]]; then
+    local gsd_match
+    gsd_match=$(ls -1d "$planning_root/phases/$phase_num"-* 2>/dev/null | head -1)
+    if [[ -n "$gsd_match" ]]; then
+      echo "$gsd_match"
+      return 0
+    fi
+  fi
+
+  # 5. No existing dir — return canonical default (will be created)
+  echo "$planning_root/phase-$phase_num"
+  return 1
+}
+
 # === Run a single phase ===
 run_phase() {
   local phase_num="$1"
@@ -175,12 +220,28 @@ run_phase() {
     return 0
   fi
 
-  # Check for GSD planning dir
-  local phase_dir="$PROJECT_DIR/.planning/phase-$phase_num"
+  # NEW: resolve phase dir respecting GSD shape (decimal, slugged, etc.)
+  local phase_dir
+  phase_dir=$(resolve_phase_dir "$phase_num")
+  local existed=$?
 
-  # Step 1: Plan phase via gsd-plan-phase or AI dispatch
+  if [[ $existed -eq 0 ]]; then
+    log INFO "Found existing phase dir: ${phase_dir#$PROJECT_DIR/}"
+  else
+    log INFO "No existing phase dir; will create $phase_dir if work needed"
+  fi
+
+  # Step 1: Plan phase — but ONLY if PLAN.md doesn't already exist anywhere
+  # in the resolved dir. Don't write empty plans into a sibling.
   if [[ ! -f "$phase_dir/PLAN.md" ]]; then
+    # Before planning, check if GSD already produced a plan we should respect
+    if [[ $existed -eq 0 ]]; then
+      log WARN "Phase dir exists but no PLAN.md — likely WIP from GSD or other planner"
+      log WARN "Refusing to overwrite. Inspect: $phase_dir"
+      return 0
+    fi
     log INFO "Planning phase $phase_num..."
+    mkdir -p "$phase_dir"
     plan_phase "$phase_num"
   else
     log OK "Phase $phase_num already planned"
