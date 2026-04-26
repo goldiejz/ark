@@ -233,18 +233,19 @@ execute_phase() {
   local phase_num="$1"
   local phase_dir="$PROJECT_DIR/.planning/phase-$phase_num"
 
-  # If user has Claude Code skills, prefer dispatching via gsd-execute-phase
-  # Otherwise, dispatch each task to Codex sequentially
+  log INFO "Executing tasks via execute-phase.sh (Codex/Gemini/Haiku cascade)..."
 
-  log INFO "Executing tasks via cheapest AI cascade..."
+  # Real implementation: dispatches each task to AI, applies output, commits
+  bash "$VAULT_PATH/scripts/execute-phase.sh" "$PROJECT_DIR" "$phase_num"
+  local exec_result=$?
 
-  # For now, this is a placeholder that would dispatch to Codex/Claude
-  # Real implementation: read PLAN.md tasks, dispatch each one, verify, commit
+  if [[ $exec_result -eq 0 ]]; then
+    log OK "All tasks dispatched and applied"
+  else
+    log WARN "Some tasks failed — see $phase_dir/task-*-output.md"
+  fi
 
-  # Simulate work for the test/loop
-  log INFO "(Execution stub — real implementation dispatches to Codex per task)"
-
-  return 0
+  return $exec_result
 }
 
 # === Verify phase ===
