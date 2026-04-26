@@ -655,18 +655,33 @@ main() {
   ( while true; do sleep 5; regen_html; done ) &
   REGEN_PID=$!
 
-  # Detect LAN IP so the user can reach this from a phone on the same wifi.
-  # python http.server binds to all interfaces by default — already LAN-reachable.
-  local _lan_ip
+  # Detect LAN + Tailscale IPs so the user can reach this from a phone.
+  # python http.server binds to all interfaces by default — both LAN and tailnet
+  # interfaces are already reachable.
+  local _lan_ip _ts_ip _ts_host
   _lan_ip=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}')
+  # Tailscale: prefer tailnet IP + MagicDNS hostname when daemon running; silent on failure.
+  _ts_ip=$(tailscale ip -4 2>/dev/null | head -1)
+  _ts_host=$(tailscale status --json 2>/dev/null | python3 -c "import json,sys
+try:
+    d = json.load(sys.stdin)
+    print(d.get('Self',{}).get('DNSName','').rstrip('.'))
+except Exception:
+    pass" 2>/dev/null)
 
   printf '🌐 Ark Dashboard running on port %s  (Ctrl-C to stop)\n' "$WEB_PORT"
-  printf '   Local:   http://localhost:%s\n' "$WEB_PORT"
+  printf '   Local:    http://localhost:%s\n' "$WEB_PORT"
   if [[ -n "$_lan_ip" ]]; then
-    printf '   Network: http://%s:%s    ← from phone/tablet on same wifi\n' "$_lan_ip" "$WEB_PORT"
+    printf '   Wifi:     http://%s:%s    ← phone/tablet on same wifi\n' "$_lan_ip" "$WEB_PORT"
   fi
-  printf '   Webroot: %s\n' "$WEB_DIR"
-  printf '   Refresh: 5s (browser <meta refresh>)\n\n'
+  if [[ -n "$_ts_ip" ]]; then
+    printf '   Tailscale http://%s:%s    ← any device on your tailnet (preferred)\n' "$_ts_ip" "$WEB_PORT"
+  fi
+  if [[ -n "$_ts_host" ]]; then
+    printf '   MagicDNS  http://%s:%s\n' "$_ts_host" "$WEB_PORT"
+  fi
+  printf '   Webroot:  %s\n' "$WEB_DIR"
+  printf '   Refresh:  5s (browser <meta refresh>)\n\n'
 
   # Foreground (blocking): run python as a child so this bash retains the
   # cleanup trap. Bash 3 `wait <pid>` is NOT interruptible by signals — so
