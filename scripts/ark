@@ -206,6 +206,9 @@ Commands:
     backup      Create timestamped vault backup
     validate    Detect drift in cached templates
     observe     Continuous monitoring + pattern detection (long-running daemon)
+    continuous  Continuous-operation agent (launchd-driven). Subcommands:
+                  install | uninstall | status | pause | resume | tick
+                  Run 'ark continuous --help' for full usage + INBOX format.
 
   OBSERVABILITY:
     dashboard   CEO dashboard (read-only). Default: bash version (Tier A, <2s).
@@ -237,6 +240,55 @@ cmd_align() {
   print_header
   shift_args=("${@:2}")
   bash "$VAULT_PATH/scripts/ark-align.sh" "${shift_args[@]:-$PROJECT_DIR}"
+}
+
+cmd_continuous() {
+  # Phase 7 Plan 07-05 — pure pass-through to scripts/ark-continuous.sh.
+  # Mirrors `ark dashboard` / `ark promote-lessons` wiring patterns: zero
+  # business logic in the dispatcher; subshell exit codes propagate.
+  local sub="${1:-}"
+  shift || true
+
+  if [[ ! -f "$VAULT_PATH/scripts/ark-continuous.sh" ]]; then
+    echo -e "${RED}❌ scripts/ark-continuous.sh not found — Phase 7 not yet installed${NC}" >&2
+    exit 1
+  fi
+
+  case "$sub" in
+    install)   bash "$VAULT_PATH/scripts/ark-continuous.sh" --install "$@" ;;
+    uninstall) bash "$VAULT_PATH/scripts/ark-continuous.sh" --uninstall "$@" ;;
+    status)    bash "$VAULT_PATH/scripts/ark-continuous.sh" --status "$@" ;;
+    pause)     bash "$VAULT_PATH/scripts/ark-continuous.sh" --pause "$@" ;;
+    resume)    bash "$VAULT_PATH/scripts/ark-continuous.sh" --resume "$@" ;;
+    tick)      bash "$VAULT_PATH/scripts/ark-continuous.sh" --tick "$@" ;;
+    ""|help|-h|--help)
+      cat >&2 <<EOF
+usage: ark continuous <subcommand>
+
+Subcommands:
+  install     generate + load ~/Library/LaunchAgents/com.ark.continuous.plist
+  uninstall   unload + remove the launchd agent + plist
+  status      show last tick / next tick / recent decisions / daily tokens
+  pause       create PAUSE file (kill-switch — agent skips ticks while present)
+  resume      remove PAUSE file (resume scheduled ticks)
+  tick        run one tick manually (for debugging)
+
+INBOX:
+  Drop tasks into ~/vaults/ark/INBOX/ as plain-text or markdown files.
+  Each tick scans the INBOX, dispatches work, and archives processed items.
+
+Environment:
+  ARK_LAUNCHAGENTS_DIR  Override LaunchAgents dir (test isolation)
+  ARK_HOME              Override vault path (default: ~/vaults/ark)
+EOF
+      return 2
+      ;;
+    *)
+      echo "unknown subcommand: $sub" >&2
+      echo "run 'ark continuous --help' for usage" >&2
+      return 2
+      ;;
+  esac
 }
 
 cmd_create() {
@@ -347,6 +399,7 @@ EOF
     esac
     ;;
   observe)    shift; bash "$VAULT_PATH/scripts/ark-observer.sh" "$@" ;;
+  continuous) shift; cmd_continuous "$@" ;;
   context)    shift; bash "$VAULT_PATH/scripts/ark-context.sh" "$@" ;;
   create)     shift; cmd_create "$@" ;;
   deliver)    shift; bash "$VAULT_PATH/scripts/ark-deliver.sh" "$@" ;;
