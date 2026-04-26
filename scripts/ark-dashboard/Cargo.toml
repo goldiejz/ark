@@ -1,0 +1,15 @@
+[package]
+name = "ark-dashboard"
+version = "0.1.0"
+edition = "2021"
+description = "Ark CEO Dashboard — Tier B TUI (Phase 6.5)"
+
+[dependencies]
+ratatui = "0.28"
+crossterm = "0.28"
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
