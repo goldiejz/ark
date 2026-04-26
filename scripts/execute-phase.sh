@@ -455,10 +455,16 @@ apply_task_output() {
   local out_file="/tmp/brain-output-$$.txt"
   echo "$output" > "$out_file"
 
-  # Robust Python parser handling 3 common AI output formats:
-  # 1. ```<filepath>\n<content>\n```
-  # 2. **File: `<filepath>`**\n```language\n<content>\n```
-  # 3. ## <filepath>\n```\n<content>\n```
+  # Robust Python parser handling 4 common AI output formats:
+  # 1. ```<filepath>\n<content>\n```                                  (filename-in-fence)
+  # 2. **File: `<filepath>`**\n```<lang>\n<content>\n```               (markdown File: header)
+  # 3. ## <filepath>\n```\n<content>\n```                              (markdown header)
+  # 4. <filepath>:\n```<lang>\n<content>\n```                          (filename-on-own-line, Codex default)
+  #
+  # All 4 patterns run UNCONDITIONALLY (was: gated by `if not applied`).
+  # The gating bug masked 6 of 7 files in real Codex output: once Pattern 1
+  # found one valid file, Patterns 2/3 never ran. Now they all run and
+  # results are deduplicated by filepath.
   export BRAIN_OUTPUT_FILE="$out_file"
   export BRAIN_PROJECT_DIR="$PROJECT_DIR"
   local applied_files=$(python3 <<'PYEOF'
@@ -470,40 +476,38 @@ with open(os.environ['BRAIN_OUTPUT_FILE'], 'r') as f:
 
 project_dir = os.environ['BRAIN_PROJECT_DIR']
 applied = []
+seen = set()  # dedupe by filepath
 
-# Common file extensions we expect
 VALID_EXTS = {'.ts', '.tsx', '.js', '.jsx', '.py', '.go', '.rs',
               '.java', '.kt', '.swift', '.rb', '.php', '.html',
               '.css', '.scss', '.json', '.yaml', '.yml', '.toml',
               '.md', '.sql', '.sh', '.txt', '.env'}
 
+LANG_REJECT = {'typescript', 'javascript', 'python', 'go', 'rust',
+               'json', 'yaml', 'toml', 'bash', 'shell', 'sh',
+               'tsx', 'jsx', 'ts', 'js', 'py', 'rs', 'html', 'css',
+               'sql', 'diff', 'plain', 'text', 'sqlite', 'sqlite3'}
+
 def is_valid_filepath(path):
-    """Reject language tags, accept only paths that look like files"""
     if not path:
         return False
     if len(path) > 200:
         return False
     if '..' in path or path.startswith('/'):
         return False
-    # Must have an extension OR a directory separator
+    # Must have an extension AND/OR a directory separator
     has_ext = any(path.endswith(ext) for ext in VALID_EXTS)
     has_dir = '/' in path
     if not (has_ext or has_dir):
         return False
-    # Reject known language identifiers
-    if path.lower() in {'typescript', 'javascript', 'python', 'go',
-                         'rust', 'json', 'yaml', 'toml', 'bash', 'shell',
-                         'sh', 'tsx', 'jsx', 'ts', 'js', 'py', 'rs',
-                         'html', 'css', 'sql', 'diff', 'plain', 'text'}:
+    if path.lower() in LANG_REJECT:
         return False
     return True
 
-# Pattern 1: ```<path>\n<content>\n```
-pattern1 = r'```([^\n`]+)\n(.*?)\n```'
-for filepath, content in re.findall(pattern1, output, re.DOTALL):
-    filepath = filepath.strip()
-    if not is_valid_filepath(filepath):
-        continue
+def write_file(filepath, content):
+    if filepath in seen:
+        return False
+    seen.add(filepath)
     full_path = os.path.join(project_dir, filepath)
     dir_part = os.path.dirname(full_path)
     if dir_part:
@@ -511,36 +515,37 @@ for filepath, content in re.findall(pattern1, output, re.DOTALL):
     with open(full_path, 'w') as f:
         f.write(content)
     applied.append(filepath)
+    return True
 
-# Pattern 2: **File: `<path>`**\n```...\n<content>\n```
-if not applied:
-    pattern2 = r'(?:\*\*)?(?:File|Path):\s*`([^`\n]+)`(?:\*\*)?\s*\n```[a-z]*\n(.*?)\n```'
-    for filepath, content in re.findall(pattern2, output, re.DOTALL | re.IGNORECASE):
-        filepath = filepath.strip()
-        if not is_valid_filepath(filepath):
-            continue
-        full_path = os.path.join(project_dir, filepath)
-        dir_part = os.path.dirname(full_path)
-        if dir_part:
-            os.makedirs(dir_part, exist_ok=True)
-        with open(full_path, 'w') as f:
-            f.write(content)
-        applied.append(filepath)
+# Pattern 1: ```<path>\n<content>\n```  (filename-in-fence)
+pattern1 = r'```([^\n`]+)\n(.*?)\n```'
+for filepath, content in re.findall(pattern1, output, re.DOTALL):
+    filepath = filepath.strip()
+    if is_valid_filepath(filepath):
+        write_file(filepath, content)
 
-# Pattern 3: Header followed by code block
-if not applied:
-    pattern3 = r'(?:^|\n)#+\s*(?:\*\*)?([^\n*]+\.[a-z]+)(?:\*\*)?\s*\n+```[a-z]*\n(.*?)\n```'
-    for filepath, content in re.findall(pattern3, output, re.DOTALL):
-        filepath = filepath.strip()
-        if not is_valid_filepath(filepath):
-            continue
-        full_path = os.path.join(project_dir, filepath)
-        dir_part = os.path.dirname(full_path)
-        if dir_part:
-            os.makedirs(dir_part, exist_ok=True)
-        with open(full_path, 'w') as f:
-            f.write(content)
-        applied.append(filepath)
+# Pattern 2: **File: `<path>`**\n```<lang>\n<content>\n```
+pattern2 = r'(?:\*\*)?(?:File|Path):\s*`([^`\n]+)`(?:\*\*)?\s*\n```[a-zA-Z0-9_-]*\n(.*?)\n```'
+for filepath, content in re.findall(pattern2, output, re.DOTALL | re.IGNORECASE):
+    filepath = filepath.strip()
+    if is_valid_filepath(filepath):
+        write_file(filepath, content)
+
+# Pattern 3: ## <filepath>\n```<lang>\n<content>\n```  (markdown header)
+pattern3 = r'(?:^|\n)#+\s*(?:\*\*)?([^\n*]+\.[a-z]+)(?:\*\*)?\s*\n+```[a-zA-Z0-9_-]*\n(.*?)\n```'
+for filepath, content in re.findall(pattern3, output, re.DOTALL):
+    filepath = filepath.strip()
+    if is_valid_filepath(filepath):
+        write_file(filepath, content)
+
+# Pattern 4: <filepath>:\n```<lang>\n<content>\n```  (Codex default style)
+# Filepath on its own line, optionally followed by colon, then a fenced block.
+# Backticks around path optional. Allows up to 1 blank line between path and fence.
+pattern4 = r'(?:^|\n)`?([\w\-./]+\.[a-z]{1,8})`?\s*:?\s*\n+```[a-zA-Z0-9_-]*\n(.*?)\n```'
+for filepath, content in re.findall(pattern4, output, re.DOTALL):
+    filepath = filepath.strip()
+    if is_valid_filepath(filepath):
+        write_file(filepath, content)
 
 for f in applied:
     print(f)
