@@ -348,3 +348,98 @@ Tier 9 in `scripts/ark-verify.sh` runs a synthetic-fixture pipeline test in an i
 - Tier 9 verify: `scripts/ark-verify.sh` (search "Tier 9")
 - Plan history: `.planning/phases/03-self-improving-self-heal/{03-01..03-08}-SUMMARY.md`
 - Substrate notes: `.planning/phases/03-self-improving-self-heal/SUPERSEDES.md`
+
+---
+
+## AOS Bootstrap Autonomy Contract (Phase 4)
+
+**Status:** locked 2026-04-26 (Phase 4 — AOS: Bootstrap Autonomy)
+
+Phase 4 closes the **creation** gate. Where Phase 2 made `ark deliver` prompt-free for routine resource decisions and Phase 3 made the policy engine self-improving, Phase 4 makes `ark create` accept a one-line natural-language description and infer project-type / stack / deploy / customer with zero prompts. The same audit-log substrate (`policy.db`, `schema_version=1`, `_policy_log`) is reused — bootstrap decisions are first-class citizens of the Phase-3 learner pipeline.
+
+### Components
+
+| Component | Path | Role |
+|---|---|---|
+| Inference engine | `scripts/bootstrap-policy.sh` | Sourceable library; orchestrator `bootstrap_classify` returns TSV verdict + emits `_policy_log "bootstrap"` audit entry. Sub-functions: `bootstrap_infer_type` (keyword-overlap heuristic), `bootstrap_infer_stack` (template default + override), `bootstrap_infer_deploy` (type→target + customer override), `bootstrap_infer_customer` ("for `<name>`" parser → sanitized slug or `scratch`) |
+| Project-type templates | `bootstrap/project-types/*-template.md` | YAML frontmatter — `keywords:`, `default_stack:`, `default_deploy:` — is the SINGLE source of inference signal. No hard-coded keyword tables in code. `custom-template.md` is the empty-keyword catch-all |
+| CLAUDE.md template | `bootstrap/claude-md-template.md` + `bootstrap/claude-md-addendum/<type>.md` | Anchor-based composition: base template has named anchors (`{{ADDENDUM}}`, `{{CUSTOMER_FOOTER}}`, etc.); `sed /anchor/r file ; /anchor/d` pipeline assembles base + addendum + customer footer atomically |
+| Customer layer | `scripts/lib/bootstrap-customer.sh` + `scripts/lib/policy-config.sh` | mkdir-lock-protected first-time customer-dir init (Phase-3 lock pattern); cascading layer slots between project and vault. Resolution order: `env > project > customer > vault > default` |
+| Bootstrap entrypoint | `scripts/ark-create.sh` | Description-mode (zero prompts) + flag-mode (backward-compat) both pass through `bootstrap_classify`; CLAUDE.md and `.planning/policy.yml` written via `tmp.$$ + mv` (atomic); each invocation emits `_policy_log "bootstrap" RESOLVED_FINAL` (description-mode) or `FLAG_OVERRIDE` (flag-mode) |
+| Production-side-effect gate | `ARK_CREATE_GITHUB` env var | `gh repo create` is GUARDED. Default UNSET → no GitHub repo created (smoke tests, verifications, and isolated bootstraps are safe). Opt-in only for real publishing. Added after Plan 04-04 incident: an unguarded `gh repo create` call previously created `github.com/goldiejz/acme-sd` during a smoke test |
+
+### Inference contract
+
+`bootstrap_classify "<description>" "<customer-or-empty>"` returns one TSV line on stdout:
+
+```
+<project_type>\t<stack>\t<deploy>\t<customer>\t<confidence_pct>\t<verdict>
+```
+
+Verdict values:
+- `RESOLVED_FINAL` — confidence ≥ threshold; ark-create proceeds with inferred values
+- `FLAG_OVERRIDE` — flag-mode call; flags supersede inference
+- `LOW_CONFIDENCE` — score < threshold; emit `architectural-ambiguity` escalation, exit 2
+
+Threshold default 50; overridable via `ARK_BOOTSTRAP_CONFIDENCE_THRESHOLD_PCT` (env) or `bootstrap.confidence_threshold_pct` (any policy.yml layer). Custom catch-all uses threshold 0 by design.
+
+### Audit-log class semantics
+
+Class `bootstrap` joins `budget`, `dispatch`, `zero_tasks`, `dispatch_failure`, `escalation`, `self_heal`, `self_improve` as a Phase-3-readable class. Decision values:
+
+- `CLASSIFY_CONFIDENT` — `bootstrap_infer_type` chose a template above threshold (intermediate signal during classification)
+- `RESOLVED_FINAL` — description-mode call produced a valid scaffold; full inferred values in `context`
+- `FLAG_OVERRIDE` — flag-mode call; user-supplied flags recorded in `context` for traceability
+
+`reason` is the machine-readable token pattern (e.g., `score_80_pct_threshold_50`); `context` is a JSON object with `{description, type, stack, deploy, customer, score, threshold}`. Phase-6 cross-customer learning will read these rows to promote durable bootstrap heuristics.
+
+### Cascading customer layer (cascading config extension)
+
+The Phase-2 cascading config resolver (`scripts/lib/policy-config.sh`) gains one layer:
+
+```
+1. Env var (ARK_<UPPER_SNAKE>)
+2. <project>/.planning/policy.yml
+3. ~/vaults/ark/customers/<customer>/policy.yml   ← NEW (Phase 4)
+4. ~/vaults/ark/policy.yml
+5. Built-in defaults in scripts/ark-policy.sh
+```
+
+Customer detected from `ARK_CUSTOMER` env, then `bootstrap.customer` in any project policy.yml, else fallback to `scratch`. First project for a new customer creates `<customer>/policy.yml` under mkdir-lock with `customer.name` + `customer.created` + commented examples. Idempotent on re-creation.
+
+### Atomic-write discipline
+
+Every Phase-4 file write follows `write tmp.$$ → mv`:
+- `<project>/CLAUDE.md` — sed assembly pipeline outputs to `CLAUDE.md.tmp.$$`, then `mv`
+- `<project>/.planning/policy.yml` — heredoc to `policy.yml.tmp.$$`, then `mv`
+- `<project>/package.json` — same pattern
+- `<customer>/policy.yml` — first-init seed via tmp+mv, mkdir-locked
+
+Partial writes are impossible. CLAUDE.md is never overwritten silently — pre-existing CLAUDE.md is a destructive-op escalation.
+
+### Verification (Tier 10)
+
+Tier 10 in `scripts/ark-verify.sh` runs 5 description-mode fixtures + 1 flag-mode + 1 cascading-customer + 1 low-confidence + isolation guarantees, in an isolated tmp `ARK_HOME` (mirrors NEW-W-1 from Phase 2):
+
+- Fixture 1: service-desk (`"service desk for testco"`) → service-desk template, score ≥ threshold, valid CLAUDE.md + policy.yml
+- Fixture 2: revops (`"sales pipeline and quoting for foo"`) → revops template
+- Fixture 3: ops-intelligence (`"managed-print SLA and incident dashboard"`) → ops-intelligence (threshold 30 for this fixture)
+- Fixture 4: custom catch-all (`"one-off cli tool"`) → custom template (threshold 0)
+- Fixture 5: garbled (`"garbled xyzzy nonsense quux"`) → exit 2 + `ESCALATIONS.md` `architectural-ambiguity` row
+- Audit assertion: ≥4 `class:bootstrap` rows after the 5-fixture run
+- Backward-compat: `ark create test --type custom --stack node-cli --deploy none` → project produced + `FLAG_OVERRIDE` audit row
+- Customer cascading: project under customer with `bootstrap.confidence_threshold_pct: 80` overrides default (95 fallback) — read-back proves customer layer wins
+- `read -p` audit: 0 occurrences in `ark-create.sh`, `bootstrap-policy.sh`, `bootstrap-customer.sh`, `policy-config.sh`
+- `ARK_CREATE_GITHUB` UNSET throughout; real `~/vaults/ark/observability/policy.db` md5 unchanged before/after Tier 10
+
+22 checks total. Tier 1–9 retained.
+
+### Cross-references
+
+- Inference functions: `scripts/bootstrap-policy.sh::{bootstrap_classify, bootstrap_infer_type, bootstrap_infer_stack, bootstrap_infer_deploy, bootstrap_infer_customer}`
+- Customer layer: `scripts/lib/bootstrap-customer.sh::{bootstrap_customer_dir, bootstrap_customer_resolve_policy, bootstrap_customer_init}`
+- Cascading config (extended): `scripts/lib/policy-config.sh::{policy_config_get, policy_config_has}`
+- Bootstrap entrypoint: `scripts/ark-create.sh` (description-mode block + flag-mode block + sed-assembly pipeline)
+- Tier 10 verify: `scripts/ark-verify.sh` (search "Tier 10")
+- Plan-level history: `.planning/phases/04-bootstrap-autonomy/{04-01..04-08}-SUMMARY.md`
+- Production-side-effect note: 04-04-SUMMARY.md "Production-side-effect incident (handled)" section
