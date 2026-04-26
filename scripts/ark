@@ -210,6 +210,7 @@ Commands:
   OBSERVABILITY:
     dashboard   CEO dashboard (read-only). Default: bash version (Tier A, <2s).
                   Flag: --tui  Live Rust TUI with vim keybindings (requires Rust build).
+                  Flag: --web  Local web dashboard via python3 http.server (default port 7919).
     insights    Show cross-project insights from Phase 6
     lessons     List all lessons in the ark
     learn       Run the policy-learner (--full | --since DATE; default: last 7 days)
@@ -279,6 +280,23 @@ case "$COMMAND" in
         fi
         exec "$_tui_bin" "$@"
         ;;
+      --web)
+        # Tier C — local web dashboard (bash + python3 http.server).
+        # Phase 6.5 — REQ-DASH-09, REQ-DASH-10.
+        shift
+        _web_port="7919"
+        if [[ "${1:-}" == "--port" ]]; then
+          shift
+          _web_port="${1:-7919}"
+          shift || true
+        fi
+        if [[ ! -f "$VAULT_PATH/scripts/ark-dashboard-web.sh" ]]; then
+          echo -e "${RED}❌ Tier C web dashboard not yet installed${NC}" >&2
+          echo "   Expected: $VAULT_PATH/scripts/ark-dashboard-web.sh" >&2
+          exit 1
+        fi
+        ARK_DASHBOARD_PORT="$_web_port" exec bash "$VAULT_PATH/scripts/ark-dashboard-web.sh"
+        ;;
       --help|-h)
         cat <<EOF
 ark dashboard — CEO dashboard (read-only over vault audit data)
@@ -286,6 +304,9 @@ ark dashboard — CEO dashboard (read-only over vault audit data)
 Usage:
   ark dashboard              Tier A bash dashboard (default, <2s, 7 sections)
   ark dashboard --tui        Tier B live Rust TUI (vim keybindings, 2s polling)
+  ark dashboard --web        Tier C local web dashboard (browser, auto-refresh 5s)
+                               --port N   Override default port 7919
+                               (also honors ARK_DASHBOARD_PORT env)
   ark dashboard --help       Show this help
 
 Tier A flags (passed through to scripts/ark-dashboard.sh):
@@ -295,7 +316,10 @@ Tier A flags (passed through to scripts/ark-dashboard.sh):
 Tier B requires the Rust toolchain. Build once with:
   cd $VAULT_PATH/scripts/ark-dashboard && cargo build --release
 
-Both tiers are strictly read-only. Mark-resolved actions route through
+Tier C uses python3 stdlib http.server (no extra deps). Read-only over the
+same data sources as Tier A. Browser auto-refreshes via <meta refresh>.
+
+All three tiers are strictly read-only. Mark-resolved actions route through
 'ark escalations --resolve <id>' (single-writer audit path).
 EOF
         exit 0
