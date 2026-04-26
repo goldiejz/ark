@@ -616,6 +616,188 @@ PY
     "^OK$"
 fi
 
+# ━━━ Tier 10: Bootstrap autonomy under stress (AOS Phase 4) ━━━
+# Phase 4 exit gate. Mechanizes "scaffold 5 different project types from
+# 1-line descriptions, no prompts." Isolated tmp vault per NEW-W-1; real
+# vault policy.db md5 captured before/after to guarantee no leakage.
+# ARK_CREATE_GITHUB is left UNSET — the gate added in 04-04 ensures no
+# real GitHub repos are created during verification.
+if should_run_tier 10; then
+  echo ""
+  echo -e "${BLUE}━━━ Tier 10: Bootstrap autonomy ━━━${NC}"
+fi
+
+# 10.1 — bootstrap-policy.sh existence + syntax + self-test
+run_existence_check 10 "bootstrap-policy.sh present" "$VAULT_PATH/scripts/bootstrap-policy.sh"
+run_check 10 "bootstrap-policy.sh syntax valid" \
+  "bash -n '$VAULT_PATH/scripts/bootstrap-policy.sh' && echo OK" \
+  "OK"
+run_check 10 "bootstrap-policy self-test passes" \
+  "bash '$VAULT_PATH/scripts/bootstrap-policy.sh' test 2>&1 | tail -3" \
+  "ALL .* TESTS PASSED|tests passed|✅"
+
+# 10.2 — bootstrap-customer.sh existence + syntax + self-test
+run_existence_check 10 "bootstrap-customer.sh present" "$VAULT_PATH/scripts/lib/bootstrap-customer.sh"
+run_check 10 "bootstrap-customer.sh syntax valid" \
+  "bash -n '$VAULT_PATH/scripts/lib/bootstrap-customer.sh' && echo OK" \
+  "OK"
+run_check 10 "bootstrap-customer self-test passes" \
+  "bash '$VAULT_PATH/scripts/lib/bootstrap-customer.sh' test 2>&1 | tail -3" \
+  "ALL .* TESTS PASSED|tests passed|✅"
+
+# 10.3 — claude-md-template + addendums
+run_existence_check 10 "claude-md-template.md present" "$VAULT_PATH/bootstrap/claude-md-template.md"
+run_check 10 "claude-md-template has 6 anchor types" \
+  "grep -cE '\\{\\{(PROJECT_NAME|PROJECT_TYPE|CUSTOMER|CREATED_DATE|ADDENDUM|CUSTOMER_FOOTER)\\}\\}' '$VAULT_PATH/bootstrap/claude-md-template.md' | tr -d ' '" \
+  "^[6-9]$|^[1-9][0-9]+$"
+run_check 10 "claude-md-addendum has 4 files" \
+  "ls '$VAULT_PATH/bootstrap/claude-md-addendum/' 2>/dev/null | grep -cE '^(service-desk|revops|ops-intelligence|custom)\\.md$'" \
+  "^4$"
+
+# 10.4 — project-types templates have keywords + default_stack + default_deploy
+run_check 10 "project-types templates have keywords/default_stack/default_deploy frontmatter" \
+  "all=true; for f in '$VAULT_PATH'/bootstrap/project-types/*.md; do for k in keywords default_stack default_deploy; do grep -qE \"^\$k:\" \"\$f\" || all=false; done; done; echo \$all" \
+  "^true$"
+
+# 10.5 — ark-create.sh sources bootstrap-policy.sh
+run_check 10 "ark-create.sh sources bootstrap-policy.sh" \
+  "grep -cE 'bootstrap-policy\\.sh' '$VAULT_PATH/scripts/ark-create.sh'" \
+  "^[1-9]"
+
+# 10.6 — ARK_CREATE_GITHUB gate present
+run_check 10 "ark-create.sh has ARK_CREATE_GITHUB gate" \
+  "grep -c 'ARK_CREATE_GITHUB' '$VAULT_PATH/scripts/ark-create.sh'" \
+  "^[1-9]"
+
+# === Tier 10 synthetic 5-fixture pipeline (NEW-W-1 isolation) ===
+if should_run_tier 10; then
+  T10_VAULT=$(mktemp -d -t ark-tier10-vault.XXXXXX)
+  T10_PROJECTS=$(mktemp -d -t ark-tier10-proj.XXXXXX)
+  T10_REAL_DB="$VAULT_PATH/observability/policy.db"
+  T10_BEFORE_MD5=$(md5 -q "$T10_REAL_DB" 2>/dev/null || md5sum "$T10_REAL_DB" 2>/dev/null | awk '{print $1}')
+  T10_BEFORE_MD5="${T10_BEFORE_MD5:-NO_DB}"
+
+  cp -R "$VAULT_PATH/scripts" "$T10_VAULT/"
+  cp -R "$VAULT_PATH/bootstrap" "$T10_VAULT/"
+  mkdir -p "$T10_VAULT/observability" "$T10_VAULT/templates/parent-automation"
+  touch "$T10_VAULT/templates/parent-automation/dummy.ts" \
+        "$T10_VAULT/templates/parent-automation/tsconfig.json"
+
+  # Initialise the isolated audit DB so _policy_log writes there, not the real DB.
+  T10_DB="$T10_VAULT/observability/policy.db"
+  ARK_POLICY_DB="$T10_DB" ARK_HOME="$T10_VAULT" \
+    bash -c "source '$VAULT_PATH/scripts/lib/policy-db.sh'; db_init" >/dev/null 2>&1
+
+  # === Fixture 1: service-desk (confident, conf=60) ===
+  unset ARK_CREATE_GITHUB
+  T10_F1_OUT=$(ARK_HOME="$T10_VAULT" ARK_POLICY_DB="$T10_DB" \
+    bash "$T10_VAULT/scripts/ark-create.sh" \
+      "service desk for acme with sla and itil" \
+      --customer acme --path "$T10_PROJECTS" 2>&1) || true
+  T10_F1_DIR="$T10_PROJECTS/acme-sd"
+
+  run_check 10 "fixture1 (service-desk): project dir + valid CLAUDE.md + policy.yml" \
+    "ok=true; [[ -d '$T10_F1_DIR' ]] || ok=false; [[ -f '$T10_F1_DIR/CLAUDE.md' ]] || ok=false; [[ -f '$T10_F1_DIR/.planning/policy.yml' ]] || ok=false; grep -q '{{' '$T10_F1_DIR/CLAUDE.md' 2>/dev/null && ok=false; grep -q 'bootstrap.project_type: service-desk' '$T10_F1_DIR/.planning/policy.yml' 2>/dev/null || ok=false; echo \$ok" \
+    "^true$"
+
+  # === Fixture 2: revops (confident, conf=100) ===
+  unset ARK_CREATE_GITHUB
+  T10_F2_OUT=$(ARK_HOME="$T10_VAULT" ARK_POLICY_DB="$T10_DB" \
+    bash "$T10_VAULT/scripts/ark-create.sh" \
+      "revops crm pipeline for foo with margin approval" \
+      --customer foo --path "$T10_PROJECTS" 2>&1) || true
+  T10_F2_DIR="$T10_PROJECTS/foo-rev"
+
+  run_check 10 "fixture2 (revops): project dir + valid CLAUDE.md + policy.yml" \
+    "ok=true; [[ -d '$T10_F2_DIR' ]] || ok=false; [[ -f '$T10_F2_DIR/CLAUDE.md' ]] || ok=false; [[ -f '$T10_F2_DIR/.planning/policy.yml' ]] || ok=false; grep -q '{{' '$T10_F2_DIR/CLAUDE.md' 2>/dev/null && ok=false; grep -q 'bootstrap.project_type: revops' '$T10_F2_DIR/.planning/policy.yml' 2>/dev/null || ok=false; echo \$ok" \
+    "^true$"
+
+  # === Fixture 3: ops-intelligence (conf=40, threshold lowered to 30) ===
+  unset ARK_CREATE_GITHUB
+  T10_F3_OUT=$(ARK_BOOTSTRAP_CONFIDENCE_THRESHOLD_PCT=30 \
+    ARK_HOME="$T10_VAULT" ARK_POLICY_DB="$T10_DB" \
+    bash "$T10_VAULT/scripts/ark-create.sh" \
+      "ops intelligence dashboard with halopsa for msp" \
+      --customer msp --path "$T10_PROJECTS" 2>&1) || true
+  T10_F3_DIR="$T10_PROJECTS/msp-ops"
+
+  run_check 10 "fixture3 (ops-intelligence): project dir + valid CLAUDE.md + policy.yml" \
+    "ok=true; [[ -d '$T10_F3_DIR' ]] || ok=false; [[ -f '$T10_F3_DIR/CLAUDE.md' ]] || ok=false; [[ -f '$T10_F3_DIR/.planning/policy.yml' ]] || ok=false; grep -q '{{' '$T10_F3_DIR/CLAUDE.md' 2>/dev/null && ok=false; grep -q 'bootstrap.project_type: ops-intelligence' '$T10_F3_DIR/.planning/policy.yml' 2>/dev/null || ok=false; echo \$ok" \
+    "^true$"
+
+  # === Fixture 4: custom catch-all (conf=0, threshold=0 to allow) ===
+  unset ARK_CREATE_GITHUB
+  T10_F4_OUT=$(ARK_BOOTSTRAP_CONFIDENCE_THRESHOLD_PCT=0 \
+    ARK_HOME="$T10_VAULT" ARK_POLICY_DB="$T10_DB" \
+    bash "$T10_VAULT/scripts/ark-create.sh" \
+      "prototype cli tool for one-off experiment" \
+      --path "$T10_PROJECTS" 2>&1) || true
+  T10_F4_DIR=$(ls -d "$T10_PROJECTS"/oneoff-* 2>/dev/null | head -1)
+
+  run_check 10 "fixture4 (custom catch-all): project dir + valid CLAUDE.md + policy.yml" \
+    "ok=true; [[ -n '$T10_F4_DIR' ]] || ok=false; [[ -d '$T10_F4_DIR' ]] || ok=false; [[ -f '$T10_F4_DIR/CLAUDE.md' ]] || ok=false; [[ -f '$T10_F4_DIR/.planning/policy.yml' ]] || ok=false; grep -q '{{' '$T10_F4_DIR/CLAUDE.md' 2>/dev/null && ok=false; grep -q 'bootstrap.project_type: custom' '$T10_F4_DIR/.planning/policy.yml' 2>/dev/null || ok=false; echo \$ok" \
+    "^true$"
+
+  # === Fixture 5: garbled → ESCALATE_AMBIGUOUS exit 2 ===
+  unset ARK_CREATE_GITHUB
+  T10_F5_RC=0
+  ARK_HOME="$T10_VAULT" ARK_POLICY_DB="$T10_DB" \
+    bash "$T10_VAULT/scripts/ark-create.sh" \
+      "garbled xyzzy nonsense quux frobozz" \
+      --path "$T10_PROJECTS" >/dev/null 2>&1 || T10_F5_RC=$?
+
+  run_check 10 "fixture5 (garbled): exit 2 + ESCALATIONS.md entry" \
+    "ok=true; [[ '$T10_F5_RC' == '2' ]] || ok=false; grep -q 'architectural-ambiguity' '$T10_VAULT/ESCALATIONS.md' 2>/dev/null || ok=false; echo \$ok" \
+    "^true$"
+
+  # === Aggregate audit-trail check: ≥4 class:bootstrap rows in isolated DB ===
+  run_check 10 "audit trail: ≥4 class:bootstrap rows after 5-fixture run" \
+    "n=\$(sqlite3 '$T10_DB' \"SELECT COUNT(*) FROM decisions WHERE class='bootstrap';\" 2>/dev/null); test \"\${n:-0}\" -ge 4 && echo OK" \
+    "^OK$"
+
+  # === Backward compat: flag-mode invocation ===
+  unset ARK_CREATE_GITHUB
+  T10_FLAG_OUT=$(ARK_HOME="$T10_VAULT" ARK_POLICY_DB="$T10_DB" \
+    bash "$T10_VAULT/scripts/ark-create.sh" \
+      flagtest-custom --type custom --customer flagtest --stack node-cli --deploy none \
+      --path "$T10_PROJECTS" 2>&1) || true
+  T10_FLAG_DIR="$T10_PROJECTS/flagtest-custom"
+
+  run_check 10 "backward compat: flag-mode produces project + FLAG_OVERRIDE audit row" \
+    "ok=true; [[ -d '$T10_FLAG_DIR' ]] || ok=false; [[ -f '$T10_FLAG_DIR/.planning/policy.yml' ]] || ok=false; n=\$(sqlite3 '$T10_DB' \"SELECT COUNT(*) FROM decisions WHERE class='bootstrap' AND decision='FLAG_OVERRIDE';\" 2>/dev/null); [[ \"\${n:-0}\" -ge 1 ]] || ok=false; echo \$ok" \
+    "^true$"
+
+  # === Customer cascading config check ===
+  T10_CASC_VAULT=$(mktemp -d -t ark-tier10-cascade.XXXXXX)
+  mkdir -p "$T10_CASC_VAULT/customers/acme"
+  cat > "$T10_CASC_VAULT/customers/acme/policy.yml" <<'CASC'
+budget.monthly_escalate_pct: 80
+CASC
+  T10_CASC_RESULT=$(ARK_HOME="$T10_CASC_VAULT" ARK_CUSTOMER=acme \
+    bash -c "source '$VAULT_PATH/scripts/lib/policy-config.sh'; policy_config_get budget.monthly_escalate_pct 95" 2>/dev/null)
+  rm -rf "$T10_CASC_VAULT"
+
+  run_check 10 "customer cascading: customer policy.yml overrides default (80 vs 95)" \
+    "echo '$T10_CASC_RESULT' | grep -qE '^80$' && echo OK" \
+    "^OK$"
+
+  # === No-prompt regression check ===
+  run_check 10 "no read -p in bootstrap-path scripts" \
+    "n=\$(grep -nE '^[[:space:]]*read[[:space:]]+-p' '$VAULT_PATH/scripts/ark-create.sh' '$VAULT_PATH/scripts/ark' '$VAULT_PATH/scripts/bootstrap-policy.sh' 2>/dev/null | grep -v 'AOS: intentional gate' | wc -l | tr -d ' '); test \"\${n:-0}\" -eq 0 && echo OK" \
+    "^OK$"
+
+  # === Critical isolation guarantee: real vault policy.db md5 unchanged ===
+  T10_AFTER_MD5=$(md5 -q "$T10_REAL_DB" 2>/dev/null || md5sum "$T10_REAL_DB" 2>/dev/null | awk '{print $1}')
+  T10_AFTER_MD5="${T10_AFTER_MD5:-NO_DB}"
+
+  run_check 10 "isolation: real vault policy.db unchanged before/after Tier 10" \
+    "test '$T10_BEFORE_MD5' = '$T10_AFTER_MD5' && echo OK" \
+    "^OK$"
+
+  # Cleanup
+  rm -rf "$T10_VAULT" "$T10_PROJECTS"
+fi
+
 # ━━━ Generate report ━━━
 TOTAL=$((PASS + WARN + FAIL + SKIP))
 EXIT_CODE=0
@@ -672,6 +854,7 @@ The CEO (you) reviews this report. Per-tier breakdown:
 - **Tier 7 (GSD compatibility):** Shared phase-shape lib across delivery scripts
 - **Tier 8 (autonomy under stress):** AOS Phase 2 — policy engine, audit log, dispatcher routing
 - **Tier 9 (self-improving self-heal):** AOS Phase 3 — synthetic-fixture pipeline, isolated vault
+- **Tier 10 (bootstrap autonomy):** AOS Phase 4 — 5-fixture description-mode scaffold + isolation
 
 If any failure is critical, fix and re-run before using Ark on real work.
 
