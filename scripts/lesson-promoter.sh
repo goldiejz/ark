@@ -291,21 +291,292 @@ promoter_classify_cluster() {
 }
 
 # === SECTION: apply-pending (Plan 06-03) ===
-# Plan 06-03 fills this section in. It must define:
-#   promoter_apply_pending <verdicts_tsv_file>
-# which:
-#   - For each PROMOTE row, atomically appends a canonical entry to the
-#     route file ($UNIVERSAL_TARGET or $ANTIPATTERN_TARGET) under a
-#     mkdir-lock at $VAULT_PATH/.lesson-promoter.lock.
-#   - Idempotency: grep for canonical marker (cluster title + customer
-#     citation) before append; skip if present.
-#   - Audits via `_policy_log "lesson_promote" "PROMOTED" ...` (single
-#     writer rule from Phase 2). DEPRECATED rows audit-log decision
-#     "DEPRECATED" without writing the file.
-#   - Commits each touched vault file via git -C "$VAULT_PATH" commit.
-#   - Returns 0 on success; non-zero on lock failure.
+# Plan 06-03: promoter_apply_pending — atomic write + git commit + audit + idempotency.
+# Reads a verdicts TSV (one cluster per line) emitted by promoter_classify_cluster:
+#   cluster_id<TAB>verdict<TAB>customer_count<TAB>lesson_count<TAB>route<TAB>title_seed
+#
+# For PROMOTE: atomically appends a managed block to $UNIVERSAL_TARGET or
+# $ANTIPATTERN_TARGET under mkdir-lock at $VAULT_PATH/.lesson-promoter.lock,
+# emits one `_policy_log "lesson_promote" "PROMOTED" ...` audit row,
+# and commits the touched file in vault git.
+#
+# For DEPRECATED (conflict cluster): audit-only, no file write, decision=DEPRECATED.
+# For MEDIOCRE_KEPT_PER_CUSTOMER: audit-only when LESSON_AUDIT_MEDIOCRE=1; else silent.
+#
+# Idempotent: per-cluster canonical marker is grepped (literal-string -F) in
+# the target before append. Re-running the same verdicts produces no new
+# appends, no new audit rows, no new commits.
+#
+# Concurrency-safe: mkdir-lock serialises parallel invocations.
+# Atomic: tmp+mv only; no in-place edits.
+# Returns: 0 on success (any number applied including zero), 1 on lock failure.
+
+# Source ark-policy.sh for _policy_log (single audit writer). ark-policy.sh's
+# tail block triggers a self-test when sourced with $1=test. Shield by saving
+# + clearing $@, sourcing, then restoring.
+_LP_SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+if [[ -z "${_LP_POLICY_SOURCED:-}" ]] && [[ -f "$_LP_SCRIPTS_DIR/ark-policy.sh" ]]; then
+  if ! type _policy_log >/dev/null 2>&1; then
+    _LP_SAVED_ARGS=("$@")
+    set -- _lp_noop_arg
+    # shellcheck disable=SC1091
+    source "$_LP_SCRIPTS_DIR/ark-policy.sh" >/dev/null 2>&1 || true
+    if [[ "${#_LP_SAVED_ARGS[@]}" -gt 0 ]]; then
+      set -- "${_LP_SAVED_ARGS[@]}"
+    else
+      set --
+    fi
+    unset _LP_SAVED_ARGS
+  fi
+  _LP_POLICY_SOURCED=1
+fi
+
+# === Lock helpers (mkdir is atomic on POSIX; macOS-safe) ===
+_lp_acquire_lock() {
+  local lock="$1"
+  local timeout="${2:-30}"
+  local i=0
+  while ! mkdir "$lock" 2>/dev/null; do
+    i=$(( i + 1 ))
+    if [[ $i -ge $timeout ]]; then
+      return 1
+    fi
+    sleep 1
+  done
+  echo "$$" > "$lock/pid" 2>/dev/null || true
+  return 0
+}
+
+_lp_release_lock() {
+  local lock="$1"
+  rm -f "$lock/pid" 2>/dev/null || true
+  rmdir "$lock" 2>/dev/null || true
+}
+
+# === _lp_slug "<title>" ===
+# Lowercase, non-alphanumerics → '-', collapse runs, trim, truncate 60.
+_lp_slug() {
+  echo "$1" \
+    | tr '[:upper:]' '[:lower:]' \
+    | tr -c 'a-z0-9' '-' \
+    | sed -E 's/-+/-/g; s/^-//; s/-$//' \
+    | cut -c1-60
+}
+
+# === _lp_init_target_if_missing <path> <header> ===
+# Atomically writes a one-time managed-section header if the file is missing
+# OR present-but-empty. Never overwrites existing content.
+_lp_init_target_if_missing() {
+  local target="$1"
+  local header="$2"
+  if [[ -s "$target" ]]; then
+    return 0
+  fi
+  mkdir -p "$(dirname "$target")"
+  local tmp="${target}.tmp.$$"
+  {
+    echo "# $header"
+    echo ""
+    echo "<!-- AOS Phase 6 — auto-promoted: managed section. Manual entries above this line are preserved; auto-promoted blocks are appended below by scripts/lesson-promoter.sh. -->"
+    echo ""
+  } > "$tmp"
+  mv "$tmp" "$target"
+}
+
+# === _lp_customers_for <cluster_id> ===
+# Reads $LP_CLUSTER_TSV (cluster TSV from promoter_cluster_similar) and emits
+# a comma-separated unique customer list for the given cluster_id. Degrades
+# to "(unknown)" if the env var is not set.
+_lp_customers_for() {
+  local cid="$1"
+  if [[ -z "${LP_CLUSTER_TSV:-}" ]] || [[ ! -f "$LP_CLUSTER_TSV" ]]; then
+    echo "(unknown)"
+    return 0
+  fi
+  local list
+  list=$(awk -F'\t' -v c="$cid" '$1==c { print $2 }' "$LP_CLUSTER_TSV" \
+    | sort -u | tr '\n' ',' | sed -E 's/,$//; s/,/, /g')
+  if [[ -z "$list" ]]; then
+    echo "(unknown)"
+  else
+    echo "$list"
+  fi
+}
+
+# === _lp_seed_body_for <cluster_id> ===
+# Emits the rule body of the seed lesson (first row in cluster TSV for that
+# cluster_id). Degrades to a placeholder if the path is missing.
+_lp_seed_body_for() {
+  local cid="$1"
+  if [[ -z "${LP_CLUSTER_TSV:-}" ]] || [[ ! -f "$LP_CLUSTER_TSV" ]]; then
+    echo "_(seed body not available — LP_CLUSTER_TSV not set)_"
+    return 0
+  fi
+  local seed_path
+  seed_path=$(awk -F'\t' -v c="$cid" '$1==c { print $3; exit }' "$LP_CLUSTER_TSV")
+  if [[ -z "$seed_path" ]] || [[ ! -f "$seed_path" ]]; then
+    echo "_(seed body not available)_"
+    return 0
+  fi
+  # Strip the leading "## Lesson:" heading if present (already in our title).
+  awk 'NR==1 && tolower($0) ~ /^## lesson:/ { next } { print }' "$seed_path"
+}
+
+# === _lp_citations_for <cluster_id> ===
+# One bullet per source lesson in the cluster, formatted "- <customer>: <relpath>".
+_lp_citations_for() {
+  local cid="$1"
+  if [[ -z "${LP_CLUSTER_TSV:-}" ]] || [[ ! -f "$LP_CLUSTER_TSV" ]]; then
+    echo "- (citations not available — LP_CLUSTER_TSV not set)"
+    return 0
+  fi
+  awk -F'\t' -v c="$cid" -v root="${ARK_PORTFOLIO_ROOT:-}" '
+    $1==c {
+      cust=$2; path=$3;
+      # Best-effort relative path (strip portfolio root prefix if present)
+      rel=path;
+      if (root != "" && index(path, root) == 1) {
+        rel=substr(path, length(root)+2);
+      }
+      printf "- %s: %s\n", cust, rel
+    }
+  ' "$LP_CLUSTER_TSV"
+}
+
+# === Public: promoter_apply_pending <verdicts_tsv_file> ===
 promoter_apply_pending() {
-  echo "# Plan 06-03 has not been applied yet — apply-pending stub" >&2
+  local verdicts="${1:?usage: promoter_apply_pending <verdicts_tsv_file>}"
+  if [[ ! -s "$verdicts" ]]; then
+    echo "applied: 0 (no verdicts at $verdicts)"
+    return 0
+  fi
+
+  local lock_dir="$VAULT_PATH/.lesson-promoter.lock"
+  if ! _lp_acquire_lock "$lock_dir" 30; then
+    echo "❌ promoter_apply_pending: could not acquire lock at $lock_dir" >&2
+    return 1
+  fi
+
+  mkdir -p "$(dirname "$UNIVERSAL_TARGET")" "$(dirname "$ANTIPATTERN_TARGET")"
+  _lp_init_target_if_missing "$UNIVERSAL_TARGET"   "Universal Patterns — Cross-Customer Lessons"
+  _lp_init_target_if_missing "$ANTIPATTERN_TARGET" "Anti-Patterns — Auto-Detected Cross-Customer"
+
+  local applied_universal=0 applied_anti=0 audited=0 committed=0
+  local skipped_idem=0 skipped_conflict=0
+
+  local cluster_id verdict customer_count lesson_count route title_seed
+  while IFS=$'\t' read -r cluster_id verdict customer_count lesson_count route title_seed; do
+    [[ -z "$cluster_id" ]] && continue
+
+    case "$verdict" in
+      PROMOTE)
+        local target=""
+        case "$route" in
+          universal-patterns) target="$UNIVERSAL_TARGET" ;;
+          anti-patterns)      target="$ANTIPATTERN_TARGET" ;;
+          *)                  echo "⚠️  PROMOTE row with route=$route — skipping" >&2; continue ;;
+        esac
+
+        local slug marker
+        slug=$(_lp_slug "$title_seed")
+        marker="<!-- AOS Phase 6 — auto-promoted: ${slug}-cluster-${cluster_id} -->"
+
+        if grep -F -q "$marker" "$target" 2>/dev/null; then
+          skipped_idem=$((skipped_idem+1))
+          continue
+        fi
+
+        local block_tmp
+        block_tmp=$(mktemp -t ark-promoter-block-XXXXXXXX)
+        {
+          echo ""
+          echo "$marker"
+          echo "## ${title_seed}"
+          echo ""
+          echo "**Customers:** $(_lp_customers_for "$cluster_id")"
+          echo "**Combined occurrences:** ${lesson_count}"
+          echo "**Cluster ID:** ${cluster_id}"
+          echo "**Promoted:** $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo ""
+          _lp_seed_body_for "$cluster_id"
+          echo ""
+          echo "**Source lessons:**"
+          _lp_citations_for "$cluster_id"
+          echo ""
+          echo "---"
+        } > "$block_tmp"
+
+        local target_tmp="${target}.tmp.$$"
+        if cat "$target" "$block_tmp" > "$target_tmp" 2>/dev/null; then
+          mv "$target_tmp" "$target"
+        else
+          rm -f "$target_tmp" "$block_tmp"
+          echo "⚠️  Failed to append to $target — skipping" >&2
+          continue
+        fi
+        rm -f "$block_tmp"
+
+        if [[ "$route" == "universal-patterns" ]]; then
+          applied_universal=$((applied_universal+1))
+        elif [[ "$route" == "anti-patterns" ]]; then
+          applied_anti=$((applied_anti+1))
+        fi
+
+        # Audit (single-writer rule)
+        local ctx
+        ctx=$(printf '{"cluster_id":%s,"title_seed":"%s","lesson_count":%s,"route":"%s"}' \
+          "$cluster_id" "$(printf '%s' "$title_seed" | sed 's/\\/\\\\/g; s/"/\\"/g')" \
+          "$lesson_count" "$route")
+        if type _policy_log >/dev/null 2>&1; then
+          _policy_log "lesson_promote" "PROMOTED" \
+            "customers_${customer_count}_lessons_${lesson_count}_route_${route}" \
+            "$ctx" "" >/dev/null
+          audited=$((audited+1))
+        fi
+
+        # Vault git commit
+        if git -C "$VAULT_PATH" rev-parse --git-dir >/dev/null 2>&1; then
+          local rel="${target#$VAULT_PATH/}"
+          git -C "$VAULT_PATH" add "$rel" >/dev/null 2>&1 || true
+          if ! git -C "$VAULT_PATH" diff --cached --quiet -- "$rel" 2>/dev/null; then
+            git -C "$VAULT_PATH" commit -m \
+              "AOS Phase 6: promote cluster ${cluster_id} (${route}) — ${title_seed}" \
+              --quiet >/dev/null 2>&1 || true
+            committed=$((committed+1))
+          fi
+        fi
+        ;;
+      DEPRECATED)
+        local ctx
+        ctx=$(printf '{"cluster_id":%s,"title_seed":"%s","lesson_count":%s,"route":"none"}' \
+          "$cluster_id" "$(printf '%s' "$title_seed" | sed 's/\\/\\\\/g; s/"/\\"/g')" \
+          "$lesson_count")
+        if type _policy_log >/dev/null 2>&1; then
+          _policy_log "lesson_promote" "DEPRECATED" \
+            "conflict_customers_${customer_count}_lessons_${lesson_count}" \
+            "$ctx" "" >/dev/null
+          audited=$((audited+1))
+        fi
+        skipped_conflict=$((skipped_conflict+1))
+        ;;
+      MEDIOCRE_KEPT_PER_CUSTOMER)
+        if [[ "${LESSON_AUDIT_MEDIOCRE:-0}" == "1" ]] && type _policy_log >/dev/null 2>&1; then
+          local ctx
+          ctx=$(printf '{"cluster_id":%s,"title_seed":"%s","lesson_count":%s,"route":"none"}' \
+            "$cluster_id" "$(printf '%s' "$title_seed" | sed 's/\\/\\\\/g; s/"/\\"/g')" \
+            "$lesson_count")
+          _policy_log "lesson_promote" "MEDIOCRE_KEPT_PER_CUSTOMER" \
+            "below_threshold_customers_${customer_count}" \
+            "$ctx" "" >/dev/null
+          audited=$((audited+1))
+        fi
+        ;;
+    esac
+  done < "$verdicts"
+
+  _lp_release_lock "$lock_dir"
+
+  echo "applied: $((applied_universal+applied_anti)) (universal: $applied_universal, anti: $applied_anti, audited: $audited, committed: $committed, skipped_idempotent: $skipped_idem, skipped_conflict: $skipped_conflict)"
   return 0
 }
 # === END SECTION: apply-pending ===
@@ -362,11 +633,13 @@ promoter_run() {
   echo "clusters: $((p+d+m)) (promote: $p, deprecate: $d, mediocre: $m)"
 
   if [[ "$apply" -eq 1 ]]; then
-    local verdicts_file
+    local verdicts_file cluster_file
     verdicts_file=$(mktemp -t ark-promoter-verdicts-XXXXXXXX)
+    cluster_file=$(mktemp -t ark-promoter-clusters-XXXXXXXX)
     printf '%s\n' "$verdicts_tsv" > "$verdicts_file"
-    promoter_apply_pending "$verdicts_file"
-    rm -f "$verdicts_file"
+    printf '%s\n' "$cluster_tsv"  > "$cluster_file"
+    LP_CLUSTER_TSV="$cluster_file" promoter_apply_pending "$verdicts_file"
+    rm -f "$verdicts_file" "$cluster_file"
   fi
 }
 
@@ -414,11 +687,25 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 
   # --- Real-vault md5 capture (BEFORE any test work) ---
   REAL_VAULT_FILE="$HOME/vaults/ark/lessons/universal-patterns.md"
+  REAL_VAULT_ANTI="$HOME/vaults/ark/bootstrap/anti-patterns.md"
+  REAL_VAULT_DB="$HOME/vaults/ark/observability/policy.db"
   if [[ -f "$REAL_VAULT_FILE" ]]; then
     REAL_MD5_BEFORE=$(md5 -q "$REAL_VAULT_FILE" 2>/dev/null \
       || md5sum "$REAL_VAULT_FILE" 2>/dev/null | awk '{print $1}')
   else
     REAL_MD5_BEFORE=""
+  fi
+  if [[ -f "$REAL_VAULT_ANTI" ]]; then
+    REAL_MD5_ANTI_BEFORE=$(md5 -q "$REAL_VAULT_ANTI" 2>/dev/null \
+      || md5sum "$REAL_VAULT_ANTI" 2>/dev/null | awk '{print $1}')
+  else
+    REAL_MD5_ANTI_BEFORE=""
+  fi
+  if [[ -f "$REAL_VAULT_DB" ]]; then
+    REAL_MD5_DB_BEFORE=$(md5 -q "$REAL_VAULT_DB" 2>/dev/null \
+      || md5sum "$REAL_VAULT_DB" 2>/dev/null | awk '{print $1}')
+  else
+    REAL_MD5_DB_BEFORE=""
   fi
 
   # --- Build isolated portfolio + tmp vault ---
@@ -658,6 +945,185 @@ EOF
     *)                     vp_isolated=0 ;;
   esac
   assert_eq "1" "$vp_isolated" "VAULT_PATH redirected to tmp dir during self-test (real-vault isolation)"
+
+  # ============================================================================
+  # Plan 06-03: promoter_apply_pending — atomic write + git + audit + idempotency
+  # ============================================================================
+  echo ""
+  echo "Plan 06-03: promoter_apply_pending (atomic write + git + audit + idempotency)"
+  echo ""
+
+  # --- Isolated apply test environment (separate from outer canary so we keep
+  #     assertion 9's canary contract intact). Init tmp vault as a git repo +
+  #     attach a tmp policy.db so we can audit-count without touching real DB. ---
+  APPLY_VAULT=$(mktemp -d -t ark-promoter-apply-XXXXXXXX)
+  APPLY_DB="${TMPDIR:-/tmp}/ark-promoter-apply-$$.db"
+  mkdir -p "$APPLY_VAULT/lessons" "$APPLY_VAULT/bootstrap" "$APPLY_VAULT/observability"
+
+  export VAULT_PATH="$APPLY_VAULT"
+  export ARK_HOME="$APPLY_VAULT"
+  export UNIVERSAL_TARGET="$APPLY_VAULT/lessons/universal-patterns.md"
+  export ANTIPATTERN_TARGET="$APPLY_VAULT/bootstrap/anti-patterns.md"
+  export ARK_POLICY_DB="$APPLY_DB"
+  rm -f "$APPLY_DB" "$APPLY_DB-shm" "$APPLY_DB-wal"
+  if type db_init >/dev/null 2>&1; then
+    db_init >/dev/null 2>&1 || true
+  fi
+
+  # Insert parent decision row so any FK on correlation_id has something to point at.
+  if type sqlite3 >/dev/null 2>&1; then
+    sqlite3 "$APPLY_DB" "INSERT OR IGNORE INTO decisions (decision_id, ts, class, decision, reason, context, outcome) VALUES ('lp_seed', '2026-04-26T00:00:00Z', 'lesson_promote', 'PROMOTED', 'seed', '{}', 'success');" 2>/dev/null || true
+  fi
+
+  ( cd "$APPLY_VAULT" \
+    && git init --quiet \
+    && git config user.email "test@example.invalid" \
+    && git config user.name "Apply Test" \
+    && git config commit.gpgsign false ) >/dev/null 2>&1
+
+  # Use the same TEST_PORTFOLIO fixture (3 customers w/ RBAC + anti-pattern).
+  export ARK_PORTFOLIO_ROOT="$TEST_PORTFOLIO"
+
+  # === Test 1: full pipeline run --apply against isolated vault ===
+  apply1_out=$(promoter_run --apply 2>&1)
+
+  # universal-patterns.md was created
+  [[ -s "$UNIVERSAL_TARGET" ]] && up1=1 || up1=0
+  assert_eq "1" "$up1" "06-03: universal-patterns.md created with content after --apply"
+
+  # anti-patterns.md was created (init header at minimum)
+  [[ -s "$ANTIPATTERN_TARGET" ]] && ap1=1 || ap1=0
+  assert_eq "1" "$ap1" "06-03: anti-patterns.md created with content after --apply"
+
+  # universal-patterns.md contains the canonical marker for at least one cluster
+  univ_markers=$(grep -c '<!-- AOS Phase 6 — auto-promoted: .*-cluster-' "$UNIVERSAL_TARGET" 2>/dev/null || echo 0)
+  univ_markers=$(echo "$univ_markers" | tr -d ' \n')
+  assert_ge 1 "$univ_markers" "06-03: universal-patterns.md has >=1 cluster canonical marker"
+
+  # anti-patterns.md contains the anti-pattern marker (cust-a + cust-b have anti-pattern lessons)
+  anti_markers=$(grep -c '<!-- AOS Phase 6 — auto-promoted: .*-cluster-' "$ANTIPATTERN_TARGET" 2>/dev/null || echo 0)
+  anti_markers=$(echo "$anti_markers" | tr -d ' \n')
+  assert_ge 1 "$anti_markers" "06-03: anti-patterns.md has >=1 cluster canonical marker"
+
+  # Audit DB has lesson_promote PROMOTED rows
+  if type sqlite3 >/dev/null 2>&1; then
+    promoted_rows=$(sqlite3 "$APPLY_DB" "SELECT count(*) FROM decisions WHERE class='lesson_promote' AND decision='PROMOTED';" 2>/dev/null || echo 0)
+    assert_ge 2 "$promoted_rows" "06-03: audit DB has >=2 lesson_promote PROMOTED rows"
+  else
+    echo "  SKIP audit DB checks (sqlite3 unavailable)"
+  fi
+
+  # Git log has Phase 6 commits
+  commit_count1=$(git -C "$APPLY_VAULT" log --oneline --all 2>/dev/null | grep -c "AOS Phase 6: promote cluster" || true)
+  commit_count1=$(echo "$commit_count1" | tr -d ' \n')
+  assert_ge 2 "$commit_count1" "06-03: tmp vault has >=2 'AOS Phase 6: promote cluster' git commits"
+
+  # Lock dir absent after run
+  [[ -d "$APPLY_VAULT/.lesson-promoter.lock" ]] && lk1=1 || lk1=0
+  assert_eq "0" "$lk1" "06-03: lock dir absent after --apply"
+
+  # No leftover .tmp.* files in vault target dirs
+  leftover_tmp=$(find "$APPLY_VAULT/lessons" "$APPLY_VAULT/bootstrap" -name '*.tmp.*' 2>/dev/null | wc -l | tr -d ' ')
+  assert_eq "0" "$leftover_tmp" "06-03: no .tmp.* leftovers in vault target dirs"
+
+  # === Test 2: idempotency — re-run produces no new commits, no new audit rows, no new appends ===
+  univ_lines_before=$(wc -l < "$UNIVERSAL_TARGET" | tr -d ' ')
+  anti_lines_before=$(wc -l < "$ANTIPATTERN_TARGET" | tr -d ' ')
+  if type sqlite3 >/dev/null 2>&1; then
+    promoted_rows_before=$(sqlite3 "$APPLY_DB" "SELECT count(*) FROM decisions WHERE class='lesson_promote' AND decision='PROMOTED';" 2>/dev/null || echo 0)
+  fi
+  commit_count_before=$(git -C "$APPLY_VAULT" log --oneline --all 2>/dev/null | wc -l | tr -d ' ')
+
+  promoter_run --apply >/dev/null 2>&1
+
+  univ_lines_after=$(wc -l < "$UNIVERSAL_TARGET" | tr -d ' ')
+  anti_lines_after=$(wc -l < "$ANTIPATTERN_TARGET" | tr -d ' ')
+  commit_count_after=$(git -C "$APPLY_VAULT" log --oneline --all 2>/dev/null | wc -l | tr -d ' ')
+
+  assert_eq "$univ_lines_before" "$univ_lines_after" "06-03 idempotency: universal-patterns.md line count unchanged on re-run"
+  assert_eq "$anti_lines_before" "$anti_lines_after" "06-03 idempotency: anti-patterns.md line count unchanged on re-run"
+  assert_eq "$commit_count_before" "$commit_count_after" "06-03 idempotency: git commit count unchanged on re-run"
+  if type sqlite3 >/dev/null 2>&1; then
+    promoted_rows_after=$(sqlite3 "$APPLY_DB" "SELECT count(*) FROM decisions WHERE class='lesson_promote' AND decision='PROMOTED';" 2>/dev/null || echo 0)
+    assert_eq "$promoted_rows_before" "$promoted_rows_after" "06-03 idempotency: audit DB PROMOTED row count unchanged on re-run"
+  fi
+
+  # === Test 3: DEPRECATED verdict — audit row, no file write ===
+  # Manually craft a verdicts TSV with a DEPRECATED conflict cluster row.
+  CONF_VERDICTS=$(mktemp -t ark-promoter-conf-verdicts-XXXXXXXX)
+  CONF_CLUSTERS=$(mktemp -t ark-promoter-conf-clusters-XXXXXXXX)
+  printf '999\tDEPRECATED\t2\t3\tnone\tConflict cluster do vs dont\n' > "$CONF_VERDICTS"
+  : > "$CONF_CLUSTERS"  # empty — _lp_*_for helpers not invoked for DEPRECATED rows
+  univ_lines_pre_dep=$(wc -l < "$UNIVERSAL_TARGET" | tr -d ' ')
+  if type sqlite3 >/dev/null 2>&1; then
+    dep_rows_before=$(sqlite3 "$APPLY_DB" "SELECT count(*) FROM decisions WHERE class='lesson_promote' AND decision='DEPRECATED';" 2>/dev/null || echo 0)
+  fi
+  LP_CLUSTER_TSV="$CONF_CLUSTERS" promoter_apply_pending "$CONF_VERDICTS" >/dev/null 2>&1
+  univ_lines_post_dep=$(wc -l < "$UNIVERSAL_TARGET" | tr -d ' ')
+  assert_eq "$univ_lines_pre_dep" "$univ_lines_post_dep" "06-03 DEPRECATED: universal-patterns.md line count unchanged"
+  if type sqlite3 >/dev/null 2>&1; then
+    dep_rows_after=$(sqlite3 "$APPLY_DB" "SELECT count(*) FROM decisions WHERE class='lesson_promote' AND decision='DEPRECATED';" 2>/dev/null || echo 0)
+    new_dep=$(( dep_rows_after - dep_rows_before ))
+    assert_eq "1" "$new_dep" "06-03 DEPRECATED: exactly 1 new lesson_promote DEPRECATED audit row"
+  fi
+  rm -f "$CONF_VERDICTS" "$CONF_CLUSTERS"
+
+  # === Test 4: concurrent --apply runs serialise via mkdir-lock ===
+  # Synthetic verdict for new cluster (slug different from prior runs).
+  CC_VERDICTS=$(mktemp -t ark-promoter-cc-verdicts-XXXXXXXX)
+  CC_CLUSTERS=$(mktemp -t ark-promoter-cc-clusters-XXXXXXXX)
+  printf '888\tPROMOTE\t2\t3\tuniversal-patterns\tConcurrent run cluster fixture\n' > "$CC_VERDICTS"
+  : > "$CC_CLUSTERS"
+  cc_commits_before=$(git -C "$APPLY_VAULT" log --oneline --all 2>/dev/null | wc -l | tr -d ' ')
+  ( LP_CLUSTER_TSV="$CC_CLUSTERS" promoter_apply_pending "$CC_VERDICTS" >/dev/null 2>&1 ) &
+  cpid1=$!
+  ( LP_CLUSTER_TSV="$CC_CLUSTERS" promoter_apply_pending "$CC_VERDICTS" >/dev/null 2>&1 ) &
+  cpid2=$!
+  wait "$cpid1" 2>/dev/null
+  wait "$cpid2" 2>/dev/null
+  cc_commits_after=$(git -C "$APPLY_VAULT" log --oneline --all 2>/dev/null | wc -l | tr -d ' ')
+  cc_delta=$(( cc_commits_after - cc_commits_before ))
+  # Exactly one of the two siblings should have appended; the other should
+  # see the canonical marker and skip. So delta must be exactly 1.
+  assert_eq "1" "$cc_delta" "06-03 concurrent: exactly 1 new commit (mkdir-lock + idempotency serialised)"
+  [[ -d "$APPLY_VAULT/.lesson-promoter.lock" ]] && cclk=1 || cclk=0
+  assert_eq "0" "$cclk" "06-03 concurrent: lock dir released after parallel runs"
+  rm -f "$CC_VERDICTS" "$CC_CLUSTERS"
+
+  # === Test 5: real-vault md5 invariant (universal-patterns + anti-patterns + policy.db) ===
+  if [[ -n "$REAL_MD5_BEFORE" ]]; then
+    REAL_MD5_AFTER_APPLY=$(md5 -q "$REAL_VAULT_FILE" 2>/dev/null \
+      || md5sum "$REAL_VAULT_FILE" 2>/dev/null | awk '{print $1}')
+    assert_eq "$REAL_MD5_BEFORE" "$REAL_MD5_AFTER_APPLY" "06-03 real-vault: universal-patterns.md md5 unchanged"
+  else
+    echo "  PASS 06-03 real-vault: universal-patterns.md absent before+after (no mutation)"
+    pass=$((pass + 1))
+  fi
+  if [[ -n "$REAL_MD5_ANTI_BEFORE" ]]; then
+    REAL_MD5_ANTI_AFTER=$(md5 -q "$REAL_VAULT_ANTI" 2>/dev/null \
+      || md5sum "$REAL_VAULT_ANTI" 2>/dev/null | awk '{print $1}')
+    assert_eq "$REAL_MD5_ANTI_BEFORE" "$REAL_MD5_ANTI_AFTER" "06-03 real-vault: anti-patterns.md md5 unchanged"
+  else
+    echo "  PASS 06-03 real-vault: anti-patterns.md absent before+after (no mutation)"
+    pass=$((pass + 1))
+  fi
+  if [[ -n "$REAL_MD5_DB_BEFORE" ]]; then
+    REAL_MD5_DB_AFTER=$(md5 -q "$REAL_VAULT_DB" 2>/dev/null \
+      || md5sum "$REAL_VAULT_DB" 2>/dev/null | awk '{print $1}')
+    assert_eq "$REAL_MD5_DB_BEFORE" "$REAL_MD5_DB_AFTER" "06-03 real-vault: policy.db md5 unchanged"
+  else
+    echo "  PASS 06-03 real-vault: policy.db absent before+after (no mutation)"
+    pass=$((pass + 1))
+  fi
+
+  # === Cleanup apply-test isolation ===
+  rm -rf "$APPLY_VAULT"
+  rm -f "$APPLY_DB" "$APPLY_DB-shm" "$APPLY_DB-wal"
+
+  echo ""
+  if [[ "$fail" -eq 0 ]]; then
+    echo "✅ ALL APPLY-PENDING TESTS PASSED"
+  fi
 
   echo ""
   if [[ "$fail" -eq 0 ]]; then
