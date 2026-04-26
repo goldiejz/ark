@@ -2,26 +2,26 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: "Phase 6 (AOS: Cross-Customer Learning Autonomy)"
+current_phase: "Phase 6.5 (AOS: CEO Dashboard)"
 status: complete
-last_updated: "2026-04-26T19:00:00Z"
+last_updated: "2026-04-26T19:52:27Z"
 progress:
-  total_phases: 9
-  completed_phases: 6
-  total_plans: 41
-  completed_plans: 39
-  percent: 95
+  total_phases: 10
+  completed_phases: 7
+  total_plans: 49
+  completed_plans: 47
+  percent: 96
 ---
 
 # Ark — Implementation State
 
-**Last updated:** 2026-04-26T19:00:00Z
-**Current Phase:** Phase 6 (AOS: Cross-Customer Learning Autonomy)
+**Last updated:** 2026-04-26T19:52:27Z
+**Current Phase:** Phase 6.5 (AOS: CEO Dashboard)
 **Status:** complete
 
-## Plan-count audit (2026-04-26, drift reconciliation)
+## Plan-count audit (2026-04-26, drift reconciliation, Phase 6.5 close)
 
-Plan 06-03 ran a `gsd-tools` state recompute that overwrote 05-07's hand-set frontmatter values (5/7, 41/41 → 4/7, 37/39). 06-06 reconciles by counting the disk truth directly:
+Plan 06-03 ran a `gsd-tools` state recompute that overwrote 05-07's hand-set frontmatter values (5/7, 41/41 → 4/7, 37/39). 06-06 reconciled by counting the disk truth. 06.5-07 (this plan) re-reconciles after Phase 6.5 added 8 plans:
 
 | Phase | PLAN.md files | SUMMARY.md files | Status |
 |-------|--------------:|-----------------:|--------|
@@ -32,10 +32,11 @@ Plan 06-03 ran a `gsd-tools` state recompute that overwrote 05-07's hand-set fro
 | Phase 3 — Self-Improving Self-Heal | 8 | 8 | complete |
 | Phase 4 — Bootstrap Autonomy | 8 | 8 | complete |
 | Phase 5 — Portfolio Autonomy | 7 | 7 | complete |
-| Phase 6 — Cross-Customer Learning | 6 | 6 | complete (after this plan) |
-| **Totals** | **41 PLAN.md** | **39 SUMMARY.md** | — |
+| Phase 6 — Cross-Customer Learning | 6 | 6 | complete |
+| Phase 6.5 — CEO Dashboard | 8 | 8 | complete (after this plan) |
+| **Totals** | **49 PLAN.md** | **47 SUMMARY.md** | — |
 
-`total_plans: 41` reflects the 41 PLAN.md files on disk. `completed_plans: 39` reflects the 39 SUMMARY.md files (Phase 1 PLAN.md + Phase 2.5 PLAN.md remain SUMMARY-less; their narratives are folded into Phase 3+ closure docs). `total_phases: 9` enumerates Phases 0,1,2,2.5,3,4,5,6,7. `completed_phases: 6` counts Phases 0,2,2.5,3,4,5,6 marked complete in this file (note Phase 1 is in-progress and excluded; if Phase 1 closes, this count moves to 7). The previous Phase 5 frontmatter (`completed_phases: 4, completed_plans: 37`) was the gsd-tools recompute residual and undercounted by 2 phases / 2 plans.
+`total_plans: 49` reflects the 49 PLAN.md files on disk (41 prior + 8 from Phase 6.5: 06.5-01..08). `completed_plans: 47` reflects the 47 SUMMARY.md files (Phase 1 PLAN.md + Phase 2.5 PLAN.md remain SUMMARY-less; their narratives are folded into Phase 3+ closure docs). `total_phases: 10` enumerates Phases 0,1,2,2.5,3,4,5,6,6.5,7. `completed_phases: 7` counts Phases 0,2,2.5,3,4,5,6,6.5 marked complete in this file (Phase 1 is in-progress and excluded; if Phase 1 closes, this count moves to 8).
 
 ## Phase 0 — Bootstrap (complete)
 
@@ -154,6 +155,33 @@ See `.planning/phases/06-cross-customer-learning/`
 | 06-05 | Tier 12 verify suite: synthetic 3-customer fixture (8 lessons), 24 checks (10 wiring/static + 14 dynamic-pipeline) under mktemp portfolio + tmp git vault + tmp policy.db; real-vault md5 invariant for universal-patterns.md, anti-patterns.md, policy.db; idempotency assertions on re-run |
 | 06-06 | REQ-AOS-31..39 minted (this plan); STATE.md Phase 6 close + drift reconciliation; ROADMAP.md checkboxes flipped; STRUCTURE.md AOS Cross-Customer Learning Contract; SKILL.md Phase 6 posture |
 
+## Phase 6.5 — AOS: CEO Dashboard (complete)
+
+See `.planning/phases/06.5-ceo-dashboard/`
+
+**Goal:** Read-only CEO dashboard over Phase 2-6 audit data. Three-tier delivery:
+Tier A (`ark dashboard` — bash, <2s) for the quick win; Tier B (`ark dashboard --tui` —
+Rust ratatui binary with 2s live refresh) for proper interactive surface; Tier C
+(`ark dashboard --web [--port N]` — bash + python3 stdlib http.server) for browser
+access from the local machine (and trivial LAN access via `--bind 0.0.0.0`).
+
+**Exit gate:** Tier 13 30/30 + Tier 7-12 retained — confirmed `bash scripts/ark-verify.sh --tier 7` 14/14, `--tier 8` 24/25 (1 pre-existing failure unrelated to dashboard, deferred to Phase 7 backlog), `--tier 9` 20/20, `--tier 10` 22/22, `--tier 11` 16/16, `--tier 12` 24/24, `--tier 13` 30/30.
+
+| Plan    | Outcome |
+|---------|---------|
+| 06.5-01 | `scripts/ark-dashboard.sh` (Tier A — bash). All 7 sections render in <2s. Bash 3 compat. NO_COLOR + tput-degrade graceful fallback. Read-only via `sqlite3 -readonly`. |
+| 06.5-02 | `scripts/ark` dispatcher: `dashboard` subcommand routes to Tier A by default; `--tui` routes to Tier B Rust binary; help text updated. |
+| 06.5-03 | `scripts/ark-dashboard/` Rust crate scaffold: ratatui + rusqlite (bundled) + crossterm; no async runtime; SQLITE_OPEN_READ_ONLY enforced at C-API. |
+| 06.5-04 | Sections 1-3 (portfolio, escalations, budget) implemented as `Section` trait; terminal raw-mode loop with restore-on-Drop. |
+| 06.5-05 | Sections 4-7 (recent decisions, learning watch, drift detector, tier health) + 2s live refresh + vim keybindings (j/k/q/Tab/Enter/r). r-mark-resolved delegates to existing single-writer (`ark escalations --resolve`). |
+| 06.5-06 | Tier 13 verify suite (30 checks, mktemp-isolated synthetic vault, real-vault md5 invariant on policy.db + ESCALATIONS.md + universal-patterns.md + anti-patterns.md). Tier 7-12 regression sweep clean (Tier 8 baseline 24/25 — pre-existing). |
+| 06.5-07 | REQ-DASH-01..10 minted (this plan); STATE.md Phase 6.5 close + drift reconciliation; ROADMAP.md Phase 6.5 entry; STRUCTURE.md AOS CEO Dashboard Contract; SKILL.md Phase 6.5 posture. |
+| 06.5-08 | `scripts/ark-dashboard-web.sh` (Tier C — bash + python3 stdlib http.server). Same 7 sections rendered as auto-refreshing HTML page. Default port 7919; `--port N` override; `ARK_DASHBOARD_PORT` env. Polling-trap cleanup pattern (≤1s shutdown latency on Ctrl-C, bash 3 compat). HTML-escape pipeline + atomic tmp+mv writes. |
+
+**Substrate note:** Phase 6.5 sits between Phase 6 (Cross-Customer Learning) and Phase 7 (Continuous Operation). Mirrors the Phase 2.5 pattern: a substrate phase between two roadmap'd phases delivered ahead of where the original ROADMAP.md anticipated it ("Phase 8 reporting"). Phase 7 will consume this dashboard for async progress visibility.
+
+**Tier 8 deferred item (Phase 7 backlog):** Tier 8 baseline regressed from 25/25 to 24/25 prior to Phase 6.5 (the pre-existing failure is `ark escalations subcommand dispatches`, unrelated to the dashboard). Per scope-boundary discipline, 06.5-06 logged this as a deviation rather than fixing it in this phase. Phase 7 should investigate and restore.
+
 ## Phase 7 — Future
 
-Next per `.planning/ROADMAP.md`: **Phase 7 — Continuous Operation** (cron-driven INBOX consumption; user writes intent in markdown, Ark consumes the queue and ships; weekly digest; health monitor; Tier 13 verify).
+Next per `.planning/ROADMAP.md`: **Phase 7 — Continuous Operation** (cron-driven INBOX consumption; user writes intent in markdown, Ark consumes the queue and ships; weekly digest; health monitor; Tier 14 verify). Phase 7 will consume the Phase 6.5 dashboard for async progress visibility, and should also investigate/repair the Tier 8 pre-existing failure noted above.

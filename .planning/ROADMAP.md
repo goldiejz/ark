@@ -93,6 +93,23 @@ The following phases are the full AOS journey. Each phase removes one class of "
 
 **Status:** ✅ Complete — see .planning/phases/06-cross-customer-learning/
 
+### Phase 6.5 — AOS: CEO Dashboard (complete)
+**Goal:** Read-only dashboard over Phase 2-6 audit data. `ark dashboard` (Tier A — bash, <2s) + `ark dashboard --tui` (Tier B — Rust ratatui, 2s live refresh) + `ark dashboard --web [--port N]` (Tier C — bash + python3 stdlib http.server, browser-accessible).
+
+- [x] `scripts/ark-dashboard.sh` (Tier A — bash, all 7 sections, <2s, read-only via `sqlite3 -readonly`)
+- [x] `ark dashboard` subcommand wired in `scripts/ark` dispatcher
+- [x] `scripts/ark-dashboard/` Rust crate scaffold (ratatui + rusqlite + crossterm; no async runtime)
+- [x] Tier B sections 1-7 with 2s live refresh and vim keybindings (j/k/q/Tab/Enter/r)
+- [x] Read-only invariant enforced at the SQLite API layer (`sqlite3 -readonly` + `SQLITE_OPEN_READ_ONLY`)
+- [x] r-mark-resolved delegates to existing single-writer (`ark escalations --resolve`)
+- [x] Tier C local web dashboard (`scripts/ark-dashboard-web.sh`); `--web [--port N]` dispatcher; ≤1s polling-trap cleanup; HTML-escape + atomic writes
+- [x] Tier 13 verify: 30 checks against synthetic seeded vault; real-vault md5 invariants on policy.db + ESCALATIONS.md + universal-patterns.md + anti-patterns.md across Tier A+B+C sweep
+- [x] Tier 7-12 still pass (no regression introduced by Phase 6.5; Tier 8 baseline 24/25 — pre-existing failure unrelated to dashboard, deferred to Phase 7 backlog)
+
+**Exit criteria:** `ark dashboard` shows 7 sections of real vault data in <2s; `ark dashboard --tui` launches a live-refreshing TUI; `ark dashboard --web` serves the same 7 sections as auto-refreshing HTML; Tier 13 passes; real policy.db md5 unchanged across all three tier runs. **Met** — Tier 13 30/30, Tier 7/9/10/11/12 retained at 14/20/22/16/24, Tier 8 24/25 (pre-existing).
+
+**Status:** ✅ Complete — see .planning/phases/06.5-ceo-dashboard/
+
 ### Phase 7 — AOS: Continuous Operation
 **Goal:** Ark runs continuously via cron. User writes intent in markdown files; Ark consumes the queue and ships.
 
