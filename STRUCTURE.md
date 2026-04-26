@@ -540,3 +540,88 @@ Tier 11 in `scripts/ark-verify.sh` runs a synthetic 3-project / 2-customer fixtu
 - Deliver entrypoint: `scripts/ark-deliver.sh` (PROJECT_DIR gate + no-args branch)
 - Tier 11 verify: `scripts/ark-verify.sh` (search "Tier 11")
 - Plan-level history: `.planning/phases/05-portfolio-autonomy/{05-01..05-07}-SUMMARY.md`
+
+## AOS Cross-Customer Learning Contract (Phase 6)
+
+**Status:** locked 2026-04-26 (Phase 6 — AOS: Cross-Customer Learning Autonomy)
+
+Phase 6 closes the **cross-tenant learning** gate. Where Phase 3 made the policy engine self-improving WITHIN a project, and Phase 5 made portfolio selection cross-project, Phase 6 makes lessons learned in one customer auto-promote to universal when the same pattern recurs in ≥2 customers. Same audit substrate (`policy.db`, `_policy_log`, `schema_version=1`) — `class:lesson_promote` joins `portfolio`, `bootstrap`, `dispatch`, `budget`, `self_heal`, `self_improve`.
+
+### Discovery scope
+
+Walks `${ARK_PORTFOLIO_ROOT:-~/code}/*/tasks/lessons.md`. One `tasks/lessons.md` per customer project (per project-standard.md convention). Lesson IDs are L-NNN per customer (Strategix L-018 ≠ Customer A L-018 unless content matches).
+
+### Components
+
+| Component | Path | Role |
+|---|---|---|
+| Similarity primitive | `scripts/lib/lesson-similarity.sh` | Sourceable Bash 3 lib. `lesson_similarity <a-md> <b-md>` returns 0..100 integer (Jaccard token overlap on title + rule body, lowercased, alphanumerics only, 50-word stop list, length<2 dropped) |
+| Promoter engine | `scripts/lesson-promoter.sh` | Sourceable + CLI. `promoter_run [--full|--since DATE] [--apply]` orchestrates scan → cluster → classify → apply. Sub-functions: `promoter_scan_lessons` (discover lesson set under `$ARK_PORTFOLIO_ROOT`), `promoter_cluster` (similarity ≥60% → cluster), `promoter_classify` (verdict TSV per cluster), `promoter_apply_pending` (idempotent durable side-effects under mkdir-lock + atomic tmp+mv) |
+| Manual surface | `ark promote-lessons` | Dispatcher subcommand in `scripts/ark`. Default `--since 7-days-ago --apply`. Sourced-subshell invocation passes through to `promoter_run` |
+| Post-phase trigger | `scripts/ark-deliver.sh::run_phase` | After Phase 3 policy-learner trigger, fires `promoter_run --since 1-hour-ago --apply` non-fatally (`|| log WARN`). Mirrors Phase 3's discipline |
+| Audit class | `_policy_log "lesson_promote" ...` | Single-writer through `scripts/lib/policy-db.sh`. 3 decision values |
+| Universal target | `~/vaults/ark/lessons/universal-patterns.md` | Managed-section append target for PROMOTED clusters. Each promotion = git commit in vault repo |
+| Anti-pattern target | `~/vaults/ark/bootstrap/anti-patterns.md` | Managed-section append target for anti-pattern clusters. Bootstrap policy (Phase 4) reads this when generating CLAUDE.md addenda |
+| Conflicts queue | `~/vaults/ark/lessons/conflicts-pending-review.md` | Surfaced cluster-with-contradicting-rules entries (DEPRECATED verdict). Manual review required; not auto-resolved |
+| Env config | `ARK_PORTFOLIO_ROOT` | Reused from Phase 5 to scope lesson discovery |
+
+### Promotion thresholds
+
+```
+PROMOTE_MIN_CUSTOMERS  = 2    (≥2 distinct customers must contribute)
+PROMOTE_MIN_OCCURRENCES = 3   (combined lesson count across cluster ≥3)
+SIMILARITY_THRESHOLD    = 60  (Jaccard ≥60% to cluster two lessons)
+```
+
+A cluster is auto-PROMOTED only when **all three** thresholds clear. Singleton lessons (one customer, even if multiple internal occurrences) classify as `MEDIOCRE_KEPT_PER_CUSTOMER`.
+
+### Routing — universal vs anti-pattern
+
+Anti-pattern detection is title-string heuristic: cluster title matches `^(anti-pattern|don't|do not|never)` (case-insensitive) → routes to `bootstrap/anti-patterns.md`. Otherwise routes to `lessons/universal-patterns.md`.
+
+### Decision classes (audit values)
+
+All emitted via single-writer `_policy_log "lesson_promote" "<DECISION>" ...`:
+
+1. **`PROMOTED`** — cluster cleared all 3 thresholds, content appended to universal-patterns.md or anti-patterns.md, vault git commit created. `context_json` includes: cluster_signature, customer_count, lesson_count, route (universal|anti-pattern), source lesson IDs.
+2. **`DEPRECATED`** — cluster found, but lessons disagree on the rule (POSITIVE imperative + NEGATIVE imperative both present across distinct customers). Surfaced to `lessons/conflicts-pending-review.md`; not auto-promoted.
+3. **`MEDIOCRE_KEPT_PER_CUSTOMER`** — singleton or below threshold. No write; per-customer lessons stay where they are.
+
+### Idempotency invariant
+
+Re-running `promoter_run` over unchanged data is a no-op:
+- Per-cluster canonical marker (literal-string `grep -F`) prevents duplicate appends
+- mkdir-lock at `$ARK_HOME/.lesson-promoter.lock` (released on exit) prevents concurrent runs
+- Atomic write via `cat target + new block → tmp → mv` — no partial writes
+- Audit row count + git commit count + universal-patterns.md md5 all unchanged on re-run (Tier 12 assertions)
+
+### Out of scope
+
+- ML embeddings / semantic similarity (Jaccard heuristic only)
+- Customer-specific lesson redaction (user's responsibility before adding to `tasks/lessons.md`)
+- Cross-customer DEPRECATION of per-customer lessons (Phase 6 only PROMOTES; per-customer lessons stay)
+- Multi-language translation
+- Auto-resolution of contradicting lessons (logged as DEPRECATED for manual review)
+
+### Verification (Tier 12)
+
+Tier 12 in `scripts/ark-verify.sh` runs a synthetic 3-customer fixture under mktemp portfolio + tmp git vault + tmp policy.db:
+
+- T12.1–7: lib/lesson-similarity.sh and scripts/lesson-promoter.sh present, syntax valid, self-test passes; ark dispatcher exposes `promote-lessons`; ark-deliver.sh has post-phase trigger
+- T12.8–14: portfolio scan discovers 3 customer lesson files; universal-patterns.md + anti-patterns.md created in tmp vault; RBAC cluster + anti-pattern cluster both promoted; audit DB has ≥2 `lesson_promote PROMOTED` rows; tmp-vault git has ≥2 promote commits
+- T12.15: singleton (cust-c only) NOT in universal-patterns.md (negative-grep)
+- T12.16–19: lock dir absent after run; idempotent (audit count, git commit count, universal-patterns.md md5 all unchanged on re-run)
+- T12.20–22: real-vault md5 invariant (universal-patterns.md, anti-patterns.md, policy.db all unchanged)
+- T12.23–24: 0 non-comment `read -p` lines in `scripts/ark` and `scripts/ark-deliver.sh`
+
+24 checks total, 24/24 passing. Tier 7 (14/14), Tier 8 (25/25), Tier 9 (20/20), Tier 10 (22/22), Tier 11 (16/16) all retained.
+
+### Cross-references
+
+- Similarity primitive: `scripts/lib/lesson-similarity.sh::lesson_similarity`
+- Promoter functions: `scripts/lesson-promoter.sh::{promoter_run, promoter_scan_lessons, promoter_cluster, promoter_classify, promoter_apply_pending}`
+- Audit writer: `scripts/lib/policy-db.sh::_policy_log` (single-writer; class `lesson_promote`)
+- Manual surface: `scripts/ark` (`promote-lessons` subcommand)
+- Post-phase hook: `scripts/ark-deliver.sh::run_phase` (after Phase 3 policy-learner trigger)
+- Tier 12 verify: `scripts/ark-verify.sh` (search "Tier 12")
+- Plan-level history: `.planning/phases/06-cross-customer-learning/{06-01..06-06}-SUMMARY.md`
