@@ -205,6 +205,7 @@ Commands:
   OBSERVABILITY:
     insights    Show cross-project insights from Phase 6
     lessons     List all lessons in the ark
+    learn       Run the policy-learner (--full | --since DATE; default: last 7 days)
     phase-6     Manually trigger Phase 6 observability daemon
 
   help          Show this help
@@ -253,6 +254,47 @@ case "$COMMAND" in
   report)     shift; bash "$VAULT_PATH/scripts/ark-report.sh" "$@" ;;
   insights)   cmd_insights ;;
   lessons)    cmd_lessons ;;
+  learn)
+    shift
+    if [[ ! -f "$VAULT_PATH/scripts/policy-learner.sh" ]]; then
+      echo -e "${RED}❌ scripts/policy-learner.sh not found — Phase 3 not yet installed${NC}" >&2
+      exit 1
+    fi
+    case "${1:-}" in
+      --full)
+        bash "$VAULT_PATH/scripts/policy-learner.sh" --full
+        ;;
+      --since)
+        shift
+        if [[ -z "${1:-}" ]]; then
+          echo -e "${RED}❌ --since requires an ISO8601 date (e.g., 2026-04-19T00:00:00Z)${NC}" >&2
+          exit 1
+        fi
+        bash "$VAULT_PATH/scripts/policy-learner.sh" --since "$1"
+        ;;
+      --tag-first)
+        if [[ -f "$VAULT_PATH/scripts/lib/outcome-tagger.sh" ]]; then
+          bash "$VAULT_PATH/scripts/lib/outcome-tagger.sh" || true
+        fi
+        _ark_since=$(date -u -v-7d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+          || date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+          || date -u +%Y-%m-%dT%H:%M:%SZ)
+        bash "$VAULT_PATH/scripts/policy-learner.sh" --since "$_ark_since"
+        ;;
+      "")
+        # Default: last 7 days (BSD + GNU date compatible)
+        _ark_since=$(date -u -v-7d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+          || date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+          || date -u +%Y-%m-%dT%H:%M:%SZ)
+        bash "$VAULT_PATH/scripts/policy-learner.sh" --since "$_ark_since"
+        ;;
+      *)
+        echo -e "${RED}❌ Unknown flag: $1${NC}" >&2
+        echo "Usage: ark learn [--full | --since ISO8601 | --tag-first]" >&2
+        exit 1
+        ;;
+    esac
+    ;;
   phase-6)    cmd_phase6 ;;
   init)       cmd_init ;;
   help|-h|--help)  cmd_help ;;
