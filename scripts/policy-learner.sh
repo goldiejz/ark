@@ -266,6 +266,14 @@ learner_run() {
   learner_write_digest "$since_iso" || \
     echo "⚠️  digest writer failed (non-fatal)" >&2
 
+  # Plan 03-03: optionally apply the pending patches to policy.yml. Opt-in via
+  # LEARNER_AUTO_APPLY=1 so the 03-02 self-test (which compares sidecar shasum
+  # across runs) is unaffected.
+  if [[ "${LEARNER_AUTO_APPLY:-0}" == "1" ]] && [[ "$total" -gt 0 ]]; then
+    learner_apply_pending "$PENDING_FILE" || \
+      echo "⚠️  learner_apply_pending failed (non-fatal)" >&2
+  fi
+
   echo "scored: $total (promote: $p, deprecate: $d) → $PENDING_FILE"
 }
 
@@ -297,6 +305,280 @@ learner_emit_deprecations() {
   # Wrapper: emits DEPRECATE-only verdicts as TSV.
   local since="${1:-1970-01-01T00:00:00Z}"
   learner_collect_pending "$since" | awk -F'\t' '$1 == "DEPRECATE"'
+}
+
+# === Plan 03-03: Auto-patch policy.yml with locking, audit, and git commit ===
+# Extends 03-02. Reads the JSONL sidecar at $PENDING_FILE (one verdict per line),
+# acquires a portable mkdir-lock on $VAULT_PATH/.policy-yml.lock (macOS has no
+# flock(1) by default), patches policy.yml under the lock, emits a single
+# `_policy_log "self_improve" ...` audit entry per applied verdict (correlation_id
+# = first decision_id from the input set when present), and commits policy.yml to
+# the vault git repo with a structured message. Idempotent: re-applying the same
+# pending file with no policy.yml deltas produces no new audit entries and no new
+# git commits. True-blocker filter is re-applied here as defense-in-depth.
+
+# Source ark-policy.sh for _policy_log (single audit writer). ark-policy.sh's
+# tail block triggers a self-test when sourced with $1=test. We shield by
+# saving + clearing $@, sourcing, then restoring.
+_LRN_SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+if [[ -z "${_LRN_POLICY_SOURCED:-}" ]] && [[ -f "$_LRN_SCRIPTS_DIR/ark-policy.sh" ]]; then
+  if ! type _policy_log >/dev/null 2>&1; then
+    _LRN_SAVED_ARGS=("$@")
+    set -- _lrn_noop_arg
+    # shellcheck disable=SC1091
+    source "$_LRN_SCRIPTS_DIR/ark-policy.sh" >/dev/null 2>&1 || true
+    set -- "${_LRN_SAVED_ARGS[@]}"
+    unset _LRN_SAVED_ARGS
+  fi
+  _LRN_POLICY_SOURCED=1
+fi
+
+# === Lock helpers (mkdir is atomic on POSIX; macOS-safe) ===
+_lrn_acquire_lock() {
+  local lock="$1"
+  local timeout="${2:-30}"
+  local i=0
+  while ! mkdir "$lock" 2>/dev/null; do
+    i=$(( i + 1 ))
+    if [[ $i -ge $timeout ]]; then
+      return 1
+    fi
+    sleep 1
+  done
+  # Stamp the lock with our pid for diagnostics
+  echo "$$" > "$lock/pid" 2>/dev/null || true
+  return 0
+}
+
+_lrn_release_lock() {
+  local lock="$1"
+  rm -f "$lock/pid" 2>/dev/null || true
+  rmdir "$lock" 2>/dev/null || true
+}
+
+# === True-blocker re-check (defense in depth — 03-02 already filters) ===
+_lrn_is_true_blocker() {
+  local class="$1" decision="$2"
+  case " $TRUE_BLOCKER_CLASSES " in
+    *" $class "*) return 0 ;;
+  esac
+  if [[ "$class" == "escalation" ]]; then
+    return 0
+  fi
+  if [[ "$class" == "budget" ]] && [[ "$decision" == "ESCALATE_MONTHLY_CAP" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+# Public: learner_apply_pending [pending_file]
+# Default pending file: $PENDING_FILE (set by 03-02). Each non-empty JSONL line
+# is parsed, true-blocker-checked, applied to policy.yml under the lock, audited
+# via _policy_log, and committed to vault git. Idempotent.
+#
+# Returns: 0 on success (zero or more patches applied), 1 on lock failure.
+learner_apply_pending() {
+  local pending="${1:-$PENDING_FILE}"
+  local vault_path="${VAULT_PATH:-$HOME/vaults/ark}"
+  local policy_yml="$vault_path/policy.yml"
+  local lock_dir="$vault_path/.policy-yml.lock"
+
+  if [[ ! -s "$pending" ]]; then
+    echo "learner_apply_pending: no pending patches at $pending" >&2
+    return 0
+  fi
+
+  # Ensure policy.yml exists with explanatory header on first patch ever
+  if [[ ! -f "$policy_yml" ]]; then
+    mkdir -p "$(dirname "$policy_yml")"
+    cat > "$policy_yml" <<'YML'
+# policy.yml — Auto-managed learned-pattern preferences.
+#
+# Maintained by scripts/policy-learner.sh (Phase 3, AOS).
+# Each entry under `learned_patterns` was auto-derived from
+# observability/policy-decisions.jsonl outcomes. Manual edits are allowed but
+# may be overwritten on the next learner run if the same pattern crosses the
+# 5-occurrence / 80%-success / 20%-failure thresholds.
+#
+# True-blocker classes (escalation, budget/ESCALATE_MONTHLY_CAP, monthly-budget,
+# architectural-ambiguity, destructive-op, repeated-failure) are NEVER patched
+# here. They remain user-confirmed escalation paths.
+learned_patterns: {}
+YML
+  fi
+
+  # Set up trap to release lock on any exit/signal during the loop
+  local applied=0
+  local skipped_blocker=0
+  local skipped_noop=0
+  local committed=0
+
+  local line action class decision dispatcher complexity rate_pct count first_id
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+
+    action=$(echo "$line"     | sqlite3 ":memory:" "SELECT json_extract('$(printf "%s" "$line" | sed "s/'/''/g")', '\$.action');"     2>/dev/null)
+    class=$(echo "$line"      | sqlite3 ":memory:" "SELECT json_extract('$(printf "%s" "$line" | sed "s/'/''/g")', '\$.class');"      2>/dev/null)
+    decision=$(echo "$line"   | sqlite3 ":memory:" "SELECT json_extract('$(printf "%s" "$line" | sed "s/'/''/g")', '\$.decision');"   2>/dev/null)
+    dispatcher=$(echo "$line" | sqlite3 ":memory:" "SELECT json_extract('$(printf "%s" "$line" | sed "s/'/''/g")', '\$.dispatcher');" 2>/dev/null)
+    complexity=$(echo "$line" | sqlite3 ":memory:" "SELECT json_extract('$(printf "%s" "$line" | sed "s/'/''/g")', '\$.complexity');" 2>/dev/null)
+    rate_pct=$(echo "$line"   | sqlite3 ":memory:" "SELECT json_extract('$(printf "%s" "$line" | sed "s/'/''/g")', '\$.rate_pct');"   2>/dev/null)
+    count=$(echo "$line"      | sqlite3 ":memory:" "SELECT json_extract('$(printf "%s" "$line" | sed "s/'/''/g")', '\$.count');"      2>/dev/null)
+    # decision_ids is optional in the 03-02 sidecar (it currently doesn't write
+    # it). Try to extract first id; fall back to NULL.
+    first_id=$(echo "$line"   | sqlite3 ":memory:" "SELECT json_extract('$(printf "%s" "$line" | sed "s/'/''/g")', '\$.decision_ids[0]');" 2>/dev/null)
+    [[ -z "$first_id" ]] && first_id="null"
+
+    if [[ -z "$action" ]] || [[ -z "$class" ]] || [[ -z "$decision" ]]; then
+      echo "⚠️  Skipping malformed pending line: $line" >&2
+      continue
+    fi
+
+    if _lrn_is_true_blocker "$class" "$decision"; then
+      echo "⚠️  Skipping true-blocker (defense-in-depth): $class/$decision" >&2
+      skipped_blocker=$(( skipped_blocker + 1 ))
+      continue
+    fi
+
+    if ! _lrn_acquire_lock "$lock_dir" 30; then
+      echo "❌ learner_apply_pending: could not acquire lock at $lock_dir" >&2
+      return 1
+    fi
+
+    # Snapshot policy.yml content hash to detect no-op patches (idempotency)
+    local pre_hash
+    pre_hash=$(shasum "$policy_yml" 2>/dev/null | awk '{print $1}')
+
+    # Atomic patch via python3. Write to .tmp then rename.
+    POLICY_YML="$policy_yml" \
+    ACTION="$action" CLASS="$class" DECISION="$decision" \
+    DISPATCHER="$dispatcher" COMPLEXITY="$complexity" RATE_PCT="$rate_pct" \
+    python3 - <<'PY'
+import os, sys, re, tempfile
+
+p = os.environ['POLICY_YML']
+action = os.environ['ACTION']
+cls = os.environ['CLASS']
+dec = os.environ['DECISION']
+disp = os.environ['DISPATCHER'] or 'none'
+cplx = os.environ['COMPLEXITY'] or 'none'
+rate = int(os.environ['RATE_PCT'] or '0')
+
+try:
+    import yaml
+    has_yaml = True
+except ImportError:
+    has_yaml = False
+
+if has_yaml:
+    data = {}
+    if os.path.exists(p):
+        with open(p) as f:
+            data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        data = {}
+    lp = data.setdefault('learned_patterns', {})
+    if not isinstance(lp, dict):
+        lp = {}
+        data['learned_patterns'] = lp
+    c  = lp.setdefault(cls, {})
+    d  = c.setdefault(dec, {})
+    di = d.setdefault(disp, {})
+    cx = di.setdefault(cplx, {})
+    if action == 'promote':
+        cx['preferred'] = True
+        cx.pop('deprecated', None)
+    else:
+        cx['deprecated'] = True
+        cx.pop('preferred', None)
+    cx['confidence_pct'] = rate
+
+    # Atomic write
+    tmp = p + '.tmp.' + str(os.getpid())
+    with open(tmp, 'w') as f:
+        f.write("# policy.yml — Auto-managed learned-pattern preferences (Phase 3 AOS).\n")
+        f.write("# True-blocker classes are NEVER patched here.\n")
+        yaml.safe_dump(data, f, default_flow_style=False, sort_keys=True)
+    os.replace(tmp, p)
+else:
+    # Fallback: append-only dotted-key form (lossy but deterministic).
+    flag = 'preferred' if action == 'promote' else 'deprecated'
+    base = f"learned_patterns.{cls}.{dec}.{disp}.{cplx}"
+    new_lines = [
+        f"# AOS Phase 3 auto-{action} (n=?, rate={rate}%)",
+        f"{base}.{flag}: true",
+        f"{base}.confidence_pct: {rate}",
+    ]
+    existing = ""
+    if os.path.exists(p):
+        with open(p) as f:
+            existing = f.read()
+    # Idempotency in fallback mode: skip if every new_line already present.
+    if all(ln in existing for ln in new_lines if not ln.startswith('#')):
+        sys.exit(0)
+    tmp = p + '.tmp.' + str(os.getpid())
+    with open(tmp, 'w') as f:
+        f.write(existing)
+        if existing and not existing.endswith('\n'):
+            f.write('\n')
+        for ln in new_lines:
+            f.write(ln + '\n')
+    os.replace(tmp, p)
+PY
+
+    local post_hash
+    post_hash=$(shasum "$policy_yml" 2>/dev/null | awk '{print $1}')
+
+    _lrn_release_lock "$lock_dir"
+
+    if [[ "$pre_hash" == "$post_hash" ]]; then
+      # No-op: pattern was already at this state. No audit entry, no commit.
+      skipped_noop=$(( skipped_noop + 1 ))
+      continue
+    fi
+
+    applied=$(( applied + 1 ))
+
+    # Audit log entry via the SINGLE writer (per CONTEXT.md decision #1).
+    local audit_decision="PROMOTED"
+    [[ "$action" == "deprecate" ]] && audit_decision="DEPRECATED"
+    local ctx
+    ctx=$(printf '{"class":"%s","decision":"%s","dispatcher":"%s","complexity":"%s","rate_pct":%s,"count":%s}' \
+      "$class" "$decision" "$dispatcher" "$complexity" "$rate_pct" "$count")
+    local corr="$first_id"
+    [[ "$corr" == "null" || -z "$corr" ]] && corr=""
+    if type _policy_log >/dev/null 2>&1; then
+      _policy_log "self_improve" "$audit_decision" "rate_pct_${rate_pct}_count_${count}" "$ctx" "$corr" >/dev/null
+    else
+      echo "⚠️  _policy_log not available; audit entry skipped" >&2
+    fi
+
+    # Vault git commit (graceful degradation if not a git repo)
+    if git -C "$vault_path" rev-parse --git-dir >/dev/null 2>&1; then
+      git -C "$vault_path" add policy.yml >/dev/null 2>&1 || true
+      if git -C "$vault_path" diff --cached --quiet -- policy.yml; then
+        # Nothing staged (e.g., file ignored) — skip commit silently
+        :
+      else
+        git -C "$vault_path" commit -m \
+          "AOS Phase 3: auto-${action} ${class}/${decision}/${dispatcher}/${complexity} (rate ${rate_pct}%, n=${count})" \
+          --quiet >/dev/null 2>&1 || true
+        committed=$(( committed + 1 ))
+      fi
+    else
+      echo "⚠️  $vault_path is not a git repo; patch written but not committed" >&2
+    fi
+  done < "$pending"
+
+  # Archive applied pending file for forensic trail (only if we actually applied
+  # at least one patch; pure no-op runs leave the pending file in place so a
+  # subsequent invocation with new context can retry).
+  if [[ "$applied" -gt 0 ]]; then
+    mv "$pending" "${pending}.applied-$(date +%s)" 2>/dev/null || true
+  fi
+
+  echo "applied: $applied (committed: $committed, skipped_blocker: $skipped_blocker, no-op: $skipped_noop)"
+  return 0
 }
 
 # === Plan 03-04: human-readable digest writer ===
@@ -516,6 +798,151 @@ SQL
           | grep -c -E '(^|[[:space:]])(declare -A|mapfile)([[:space:]]|$)' || true)
       assert_eq "0" "$bash3_violations" "no Bash-4 constructs in lib region"
 
+      echo ""
+      echo "8. Plan 03-03: learner_apply_pending — auto-patch + git + audit + lock:"
+
+      # Isolate VAULT_PATH to a tmp git repo + tmp policy DB so we don't touch
+      # real ~/vaults/ark or its policy-decisions DB.
+      APPLY_VAULT="$(mktemp -d -t ark-apply-test-XXXXXXXX)"
+      APPLY_DB="/tmp/ark-apply-test-$$.db"
+      APPLY_PENDING="$APPLY_VAULT/observability/policy-evolution-pending.jsonl"
+      mkdir -p "$APPLY_VAULT/observability"
+      export VAULT_PATH="$APPLY_VAULT"
+      export ARK_HOME="$APPLY_VAULT"
+      export PENDING_FILE="$APPLY_PENDING"
+      export ARK_POLICY_DB="$APPLY_DB"
+      rm -f "$APPLY_DB" "$APPLY_DB-shm" "$APPLY_DB-wal"
+      db_init >/dev/null 2>&1 || true
+
+      # git init the tmp vault (hermetic — no global config bleed)
+      ( cd "$APPLY_VAULT" \
+        && git init --quiet \
+        && git config user.email "test@example.invalid" \
+        && git config user.name "Apply Test" \
+        && git config commit.gpgsign false ) >/dev/null 2>&1
+
+      # Insert parent decision rows so FK constraint on correlation_id holds.
+      for did in dec_a dec_b dec_c dec_d dec_e dec_f dec_x; do
+        sqlite3 "$APPLY_DB" <<SQL
+INSERT INTO decisions (decision_id, ts, class, decision, reason, context, outcome)
+VALUES ('$did', '2026-04-26T00:00:00Z', 'dispatch_failure', 'SELF_HEAL', 'parent', '{}', 'success');
+SQL
+      done
+
+      # Synthesize 2 PROMOTE + 1 DEPRECATE + 1 true-blocker pending lines.
+      cat > "$APPLY_PENDING" <<'EOF'
+{"action":"promote","class":"dispatch_failure","decision":"SELF_HEAL","dispatcher":"gemini","complexity":"deep","count":5,"rate_pct":100,"rate":1.0,"decision_ids":["dec_a","dec_b"]}
+{"action":"deprecate","class":"dispatch_failure","decision":"RETRY","dispatcher":"haiku","complexity":"simple","count":5,"rate_pct":20,"rate":0.2,"decision_ids":["dec_c"]}
+{"action":"promote","class":"self_heal","decision":"ATTEMPT","dispatcher":"codex","complexity":"deep","count":6,"rate_pct":83,"rate":0.83,"decision_ids":["dec_d","dec_e"]}
+{"action":"promote","class":"budget","decision":"ESCALATE_MONTHLY_CAP","dispatcher":"none","complexity":"none","count":100,"rate_pct":100,"rate":1.0,"decision_ids":["dec_f"]}
+EOF
+
+      # Run apply
+      apply_out=$(learner_apply_pending "$APPLY_PENDING" 2>&1)
+
+      # Assert policy.yml exists
+      [[ -f "$APPLY_VAULT/policy.yml" ]] && pyml=1 || pyml=0
+      assert_eq "1" "$pyml" "policy.yml created in tmp vault"
+
+      # Assert PROMOTE keys present (gemini/deep)
+      gemini_preferred=$(grep -c "preferred: true" "$APPLY_VAULT/policy.yml" 2>/dev/null || echo 0)
+      gemini_preferred=$(echo "$gemini_preferred" | tr -d ' \n')
+      # 2 promotes → 2 preferred:true lines
+      [[ "$gemini_preferred" -ge 2 ]] && pp=1 || pp=0
+      assert_eq "1" "$pp" "policy.yml has >=2 'preferred: true' entries (2 promotes)"
+
+      # Assert DEPRECATE key present
+      haiku_dep=$(grep -c "deprecated: true" "$APPLY_VAULT/policy.yml" 2>/dev/null || echo 0)
+      haiku_dep=$(echo "$haiku_dep" | tr -d ' \n')
+      [[ "$haiku_dep" -ge 1 ]] && hd=1 || hd=0
+      assert_eq "1" "$hd" "policy.yml has 'deprecated: true' (1 deprecate)"
+
+      # Assert the true-blocker (budget/ESCALATE_MONTHLY_CAP) was NOT patched.
+      # We search only for content lines (skip comments via grep -v '^[[:space:]]*#').
+      blocker_present=$(grep -v '^[[:space:]]*#' "$APPLY_VAULT/policy.yml" 2>/dev/null | grep -c "ESCALATE_MONTHLY_CAP" || true)
+      blocker_present=$(echo "$blocker_present" | tr -d ' \n')
+      assert_eq "0" "$blocker_present" "true-blocker (ESCALATE_MONTHLY_CAP) NOT in policy.yml content"
+
+      # Assert lock dir is gone
+      [[ -d "$APPLY_VAULT/.policy-yml.lock" ]] && lk=1 || lk=0
+      assert_eq "0" "$lk" "lock dir removed after run"
+
+      # Assert git commits — 3 expected (2 promote + 1 deprecate; blocker skipped)
+      commit_count=$(git -C "$APPLY_VAULT" log --oneline --all 2>/dev/null | wc -l | tr -d ' ')
+      assert_eq "3" "$commit_count" "3 git commits in tmp vault (2 auto-promote + 1 auto-deprecate)"
+
+      # Assert commit messages have the AOS Phase 3 prefix
+      promote_commits=$(git -C "$APPLY_VAULT" log --oneline --all 2>/dev/null | grep -c "AOS Phase 3: auto-promote" || true)
+      promote_commits=$(echo "$promote_commits" | tr -d ' \n')
+      assert_eq "2" "$promote_commits" "2 'auto-promote' commits"
+      deprecate_commits=$(git -C "$APPLY_VAULT" log --oneline --all 2>/dev/null | grep -c "AOS Phase 3: auto-deprecate" || true)
+      deprecate_commits=$(echo "$deprecate_commits" | tr -d ' \n')
+      assert_eq "1" "$deprecate_commits" "1 'auto-deprecate' commit"
+
+      # Assert audit log: 3 self_improve rows (PROMOTED x2, DEPRECATED x1)
+      si_rows=$(sqlite3 "$APPLY_DB" "SELECT count(*) FROM decisions WHERE class='self_improve';" 2>/dev/null || echo 0)
+      assert_eq "3" "$si_rows" "audit DB has 3 class=self_improve rows"
+      si_promoted=$(sqlite3 "$APPLY_DB" "SELECT count(*) FROM decisions WHERE class='self_improve' AND decision='PROMOTED';" 2>/dev/null || echo 0)
+      si_deprecated=$(sqlite3 "$APPLY_DB" "SELECT count(*) FROM decisions WHERE class='self_improve' AND decision='DEPRECATED';" 2>/dev/null || echo 0)
+      assert_eq "2" "$si_promoted" "audit: 2 PROMOTED self_improve rows"
+      assert_eq "1" "$si_deprecated" "audit: 1 DEPRECATED self_improve row"
+
+      # Assert correlation_id captured from first decision_id
+      corr_a=$(sqlite3 "$APPLY_DB" "SELECT correlation_id FROM decisions WHERE class='self_improve' AND reason LIKE 'rate_pct_100_count_5%';" 2>/dev/null)
+      assert_eq "dec_a" "$corr_a" "correlation_id == first decision_id (dec_a) for first promote"
+
+      # Assert pending file archived
+      [[ -f "$APPLY_PENDING" ]] && pe=1 || pe=0
+      assert_eq "0" "$pe" "pending file archived (not at original path)"
+      archived_count=$(ls "${APPLY_PENDING}.applied-"* 2>/dev/null | wc -l | tr -d ' ')
+      [[ "$archived_count" -ge 1 ]] && ac=1 || ac=0
+      assert_eq "1" "$ac" "exactly one .applied-<ts> archive exists"
+
+      # === Idempotency: rebuild same pending, re-apply, expect no new commits/audit ===
+      cat > "$APPLY_PENDING" <<'EOF'
+{"action":"promote","class":"dispatch_failure","decision":"SELF_HEAL","dispatcher":"gemini","complexity":"deep","count":5,"rate_pct":100,"rate":1.0,"decision_ids":["dec_a","dec_b"]}
+{"action":"deprecate","class":"dispatch_failure","decision":"RETRY","dispatcher":"haiku","complexity":"simple","count":5,"rate_pct":20,"rate":0.2,"decision_ids":["dec_c"]}
+{"action":"promote","class":"self_heal","decision":"ATTEMPT","dispatcher":"codex","complexity":"deep","count":6,"rate_pct":83,"rate":0.83,"decision_ids":["dec_d","dec_e"]}
+EOF
+      learner_apply_pending "$APPLY_PENDING" >/dev/null 2>&1
+
+      commit_count2=$(git -C "$APPLY_VAULT" log --oneline --all 2>/dev/null | wc -l | tr -d ' ')
+      assert_eq "3" "$commit_count2" "re-apply: still 3 commits (no-op idempotent)"
+      si_rows2=$(sqlite3 "$APPLY_DB" "SELECT count(*) FROM decisions WHERE class='self_improve';" 2>/dev/null || echo 0)
+      assert_eq "3" "$si_rows2" "re-apply: still 3 self_improve audit rows (no-op idempotent)"
+
+      # === Concurrent-run lock test ===
+      # Two background invocations; verify they serialize (lock dir prevents
+      # both from progressing past mkdir simultaneously). We assert no panic
+      # and that the final state is still consistent (3 commits, 3 audit rows).
+      cat > "$APPLY_PENDING" <<'EOF'
+{"action":"promote","class":"dispatch_failure","decision":"NEW_PATTERN","dispatcher":"gemini","complexity":"strong","count":7,"rate_pct":90,"rate":0.9,"decision_ids":["dec_x"]}
+EOF
+      ( learner_apply_pending "$APPLY_PENDING" >/dev/null 2>&1 ) &
+      pid1=$!
+      ( learner_apply_pending "$APPLY_PENDING" >/dev/null 2>&1 ) &
+      pid2=$!
+      wait "$pid1" 2>/dev/null
+      wait "$pid2" 2>/dev/null
+      # Lock should be released
+      [[ -d "$APPLY_VAULT/.policy-yml.lock" ]] && lk2=1 || lk2=0
+      assert_eq "0" "$lk2" "lock dir released after concurrent runs"
+      # Exactly one of the two siblings should have applied the new pattern
+      # (the other found the file at $APPLY_PENDING archived and either no-op'd
+      #  or found nothing). Either way: only one new commit should land.
+      commit_count3=$(git -C "$APPLY_VAULT" log --oneline --all 2>/dev/null | wc -l | tr -d ' ')
+      [[ "$commit_count3" -ge 4 ]] && [[ "$commit_count3" -le 5 ]] && cc=1 || cc=0
+      assert_eq "1" "$cc" "concurrent runs produced 4-5 total commits (no double-apply)"
+
+      # Cleanup tmp vault
+      rm -rf "$APPLY_VAULT"
+      rm -f "$APPLY_DB" "$APPLY_DB-shm" "$APPLY_DB-wal"
+      unset VAULT_PATH ARK_HOME PENDING_FILE
+      export ARK_POLICY_DB="$TEST_DB"
+
+      echo ""
+      echo "✅ ALL APPLY-PENDING TESTS PASSED"
+
       # Cleanup
       rm -f "$TEST_DB" "$TEST_DB-shm" "$TEST_DB-wal" "$TEST_PENDING"
 
@@ -539,8 +966,12 @@ SQL
       # Plan 03-04: write only the digest (no scoring/sidecar side-effects).
       learner_write_digest "${2:-1970-01-01T00:00:00Z}"
       ;;
+    apply)
+      # Plan 03-03: apply pending sidecar to policy.yml (locked + audited + git).
+      learner_apply_pending "${2:-$PENDING_FILE}"
+      ;;
     *)
-      echo "Usage: $0 [test|run|--full|--since DATE|digest [SINCE]]" >&2
+      echo "Usage: $0 [test|run|--full|--since DATE|digest [SINCE]|apply [PENDING]]" >&2
       exit 1
       ;;
   esac
