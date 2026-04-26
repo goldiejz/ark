@@ -443,3 +443,100 @@ Tier 10 in `scripts/ark-verify.sh` runs 5 description-mode fixtures + 1 flag-mod
 - Tier 10 verify: `scripts/ark-verify.sh` (search "Tier 10")
 - Plan-level history: `.planning/phases/04-bootstrap-autonomy/{04-01..04-08}-SUMMARY.md`
 - Production-side-effect note: 04-04-SUMMARY.md "Production-side-effect incident (handled)" section
+
+## AOS Portfolio Autonomy Contract (Phase 5)
+
+**Status:** locked 2026-04-26 (Phase 5 — AOS: Portfolio Autonomy)
+
+Phase 5 closes the **portfolio-selection** gate. Where Phase 2 made `ark deliver` prompt-free for routine resource decisions inside a project, Phase 3 made the policy engine self-improving, and Phase 4 made `ark create` description-driven, Phase 5 makes `ark deliver` (no args, no project named) pick the highest-leverage project from the portfolio and run its next phase. Same audit substrate (`policy.db`, `_policy_log`, `schema_version=1`) — `class:portfolio` joins `bootstrap`, `dispatch`, `budget`, `self_heal`, `self_improve`.
+
+### Entry point
+
+`ark deliver` invoked with no `--phase` and no project from outside any `.planning/`-bearing directory. The dispatcher detects no `PROJECT_DIR` and routes through `portfolio_decide` instead of single-project `run_phase`.
+
+### Components
+
+| Component | Path | Role |
+|---|---|---|
+| Portfolio engine | `scripts/ark-portfolio-decide.sh` | Sourceable library; orchestrator `portfolio_decide` discovers candidates, scores them, applies budget + cool-down filters, and emits the SELECTED winner path. Sub-functions: `_portfolio_discover` (find projects with `.planning/STATE.md` under `${ARK_PORTFOLIO_ROOT:-~/code}`, max depth 3), `_portfolio_attribute_customer` (read `bootstrap.customer` from project policy.yml; missing → `scratch`), `_portfolio_score` (heuristic), `_portfolio_budget_headroom` (cascading-config read of customer monthly cap vs used), `_portfolio_ceo_priority` (basename-match `## Next Priority` in programme.md), `_portfolio_recently_deferred` (sqlite SELECT against `class:portfolio` audit), `portfolio_pick_winner` (filter + tie-break) |
+| Deliver routing | `scripts/ark-deliver.sh` | No-args branch sources `ark-portfolio-decide.sh` and invokes `portfolio_decide`. PROJECT_DIR detection appears textually before the `portfolio_decide` call (Tier 11 static-grep gate). `--phase N` and in-project invocations bypass the engine entirely (backward compat) |
+| Audit class | `_policy_log "portfolio" ...` | Single-writer through `scripts/lib/policy-db.sh`. 4 decision values |
+| Env config | `ARK_PORTFOLIO_ROOT` | Override default `~/code` portfolio root. Used by Tier 11 to point at synthetic mktemp fixture |
+
+### Priority formula
+
+```
+priority = stuckness * 3
+         + falling_health * 2
+         + (monthly_headroom > 20 ? 1 : 0)
+         + ceo_priority * 5
+```
+
+Signal sources:
+- `stuckness` (0|1|2): `status: blocked` in STATE.md frontmatter = 2; mtime of STATE.md > 7d = 1; else 0
+- `falling_health` (0|1): pass-count regression detected in newest delivery log under `.planning/delivery-logs/`
+- `monthly_headroom` (0..100): `100 - (used / cap * 100)` from customer policy.yml; cascading-config-resolved; ≥ 80% used → headroom 0 → DEFERRED_BUDGET
+- `ceo_priority` (0|1): basename match against `## Next Priority` heading in `${ARK_PROGRAMME_MD:-~/vaults/StrategixMSPDocs/programme.md}`; +5 score boost when match (NOT a budget override — budget filter is hard, see "Observed contract" below)
+
+**Tie-break:** highest mtime of `.planning/STATE.md` wins (most-recently-touched).
+
+### Decision classes (audit values)
+
+All emitted via single-writer `_policy_log "portfolio" "<DECISION>" ...`:
+
+1. **`SELECTED`** — winner picked. `context_json` includes: chosen_project, chosen_customer, total_score, stuckness, falling_health, monthly_headroom, ceo_priority, candidates_count.
+2. **`DEFERRED_BUDGET`** — customer ≥ 80% monthly cap. Project skipped from winner pool. One row per over-cap project per `portfolio_decide` call.
+3. **`DEFERRED_HEALTHY`** — top non-budget-deferred candidate had no actionable signals (score == 0 across stuckness/falling_health/ceo_priority). Project skipped; cool-down armed.
+4. **`NO_CANDIDATE_AVAILABLE`** — no projects discovered under root, or all candidates filtered. Caller may escalate `architectural-ambiguity`.
+
+### Cool-down rule
+
+A project DEFERRED in the last 24h for the same reason class is skipped on the next decision pass. Implemented as a read-only `sqlite3 SELECT` against the audit DB at `~/vaults/ark/observability/policy.db`, filtering for `class='portfolio' AND decision IN ('DEFERRED_BUDGET','DEFERRED_HEALTHY') AND ts > now-24h AND context_json LIKE '%<basename>%'`. Tier 11 run3 (1h-old DEFERRED_HEALTHY → still cool) and run4 (25h-old → expired) both green.
+
+### CEO directive — observed contract
+
+Per Tier 11 run2: with `programme.md::## Next Priority` pointing to a project whose customer is over the 80% monthly cap:
+- `_portfolio_ceo_priority(project)` → 1 → +5 score boost
+- `_portfolio_budget_headroom(customer)` → 0 (over-cap)
+- `portfolio_pick_winner` filters rows where headroom ≤ 0 → CEO-favored project excluded from winner pool
+- A non-CEO healthy project from a budget-eligible customer wins by default
+
+**The budget filter is hard. CEO directive is a *score* boost, not an *override*.** A future plan that wants CEO to override a DEFERRED_BUDGET decision is a contract change. Tier 11 documents the current behavior.
+
+### Backward compat
+
+- `ark deliver --phase N` from inside any directory → unchanged; bypasses portfolio
+- `ark deliver` from inside a project (`.planning/STATE.md` + `.planning/ROADMAP.md` present) → unchanged; bypasses portfolio
+- `ark deliver` from outside any project → NEW: routes through `portfolio_decide`
+- Static guarantee: `grep -n PROJECT_DIR scripts/ark-deliver.sh | head -1 | cut -d: -f1` < `grep -n portfolio_decide scripts/ark-deliver.sh | head -1 | cut -d: -f1` (Tier 11 assertion)
+
+### Production-safety guarantees
+
+- `ARK_CREATE_GITHUB` is UNSET throughout portfolio-decide path (statically grep-asserted: no `gh repo create` in `ark-portfolio-decide.sh` or the `ark-deliver.sh` no-args branch)
+- Real `~/vaults/ark/observability/policy.db` md5 is invariant across Tier 11 (asserted before/after)
+- Tier 11 fixture lives entirely under `mktemp -d`; no writes to real `~/code/`
+
+### Verification (Tier 11)
+
+Tier 11 in `scripts/ark-verify.sh` runs a synthetic 3-project / 2-customer fixture under mktemp, exercising all 4 decision classes plus CEO override semantics, cool-down, expiry, and backward-compat:
+
+- T11.1–5: ark-portfolio-decide.sh present, syntax valid, self-test 40/40, ark-deliver wires it in, dispatcher documents `ARK_PORTFOLIO_ROOT`
+- T11.6–9: run1 (2 acme over-cap projects + 1 foo-c healthy) → foo-c wins, 1 SELECTED row, ≥1 DEFERRED_BUDGET row, context_json carries customer + total
+- T11.10: run2 (CEO directive on over-budget project) → budget filter wins; foo-c still selected
+- T11.11: run3 (1h-old DEFERRED_HEALTHY) → cool-down keeps foo-c out of winner pool
+- T11.12: run4 (25h-old DEFERRED_HEALTHY) → cool-down expired; SELECTED row appears
+- T11.13: run5 (empty portfolio) → NO_CANDIDATE_AVAILABLE
+- T11.14: static-grep — PROJECT_DIR appears before portfolio_decide in ark-deliver.sh
+- T11.15: static-grep — no `gh repo create` in portfolio code path
+- T11.16: real-vault policy.db md5 invariant before/after Tier 11
+
+16 checks total. Tier 7 (14/14), Tier 8 (25/25), Tier 9 (20/20), Tier 10 (22/22) all retained.
+
+### Cross-references
+
+- Portfolio functions: `scripts/ark-portfolio-decide.sh::{portfolio_decide, _portfolio_discover, _portfolio_attribute_customer, _portfolio_score, _portfolio_budget_headroom, _portfolio_ceo_priority, _portfolio_recently_deferred, portfolio_pick_winner}`
+- Cascading-config customer cap reader: `scripts/lib/policy-config.sh::policy_config_get` (extended in Phase 4; Phase 5 reads `customer.budget.monthly_cap` and `customer.budget.monthly_used`)
+- Audit writer: `scripts/lib/policy-db.sh::_policy_log` (single-writer; class `portfolio`)
+- Deliver entrypoint: `scripts/ark-deliver.sh` (PROJECT_DIR gate + no-args branch)
+- Tier 11 verify: `scripts/ark-verify.sh` (search "Tier 11")
+- Plan-level history: `.planning/phases/05-portfolio-autonomy/{05-01..05-07}-SUMMARY.md`
