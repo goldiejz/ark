@@ -582,13 +582,30 @@ esac
 # === Step 6: Apply DEPLOYMENT-specific config ===
 case "$DEPLOY" in
   cloudflare-workers)
+    # No bindings by default — wrangler can deploy without them
+    # User adds bindings via `brain secrets init` after database is created
     cat > "$PROJECT_DIR/wrangler.toml" <<EOF
 name = "$PROJECT_NAME"
 main = "src/worker.ts"
 compatibility_date = "$(date +%Y-%m-%d)"
+compatibility_flags = ["nodejs_compat"]
+
+# Add bindings as needed after deployment:
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "$PROJECT_NAME-db"
+# database_id = "<get from: wrangler d1 create $PROJECT_NAME-db>"
+#
+# [[kv_namespaces]]
+# binding = "CACHE"
+# id = "<get from: wrangler kv namespace create CACHE>"
 EOF
-    echo -e "  ${GREEN}✅${NC} Cloudflare Workers deployment config"
-    echo -e "  ${YELLOW}ℹ${NC}  After delivery, configure D1/KV bindings + database_id"
+    cat > "$PROJECT_DIR/.dev.vars.example" <<EOF
+# Local dev secrets — copy to .dev.vars (gitignored)
+# AUTH_SECRET=
+# DATABASE_URL=
+EOF
+    echo -e "  ${GREEN}✅${NC} Cloudflare Workers config (no bindings — add via brain secrets init)"
     ;;
 
   cloudflare-pages)

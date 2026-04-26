@@ -279,7 +279,7 @@ except: pass
   return $?
 }
 
-# === Apply Codex output: parse code blocks and write files ===
+# === Apply Codex output: parse code blocks and write files (robust multi-format) ===
 apply_task_output() {
   local output="$1"
   local task_num="$2"
@@ -287,40 +287,103 @@ apply_task_output() {
 
   log "Applying changes..."
 
-  # Use Python for robust code block extraction
-  local applied_files=$(python3 <<PYEOF
+  # Pass output via temp file to avoid shell escaping bugs
+  local out_file="/tmp/brain-output-$$.txt"
+  echo "$output" > "$out_file"
+
+  # Robust Python parser handling 4 common AI output formats:
+  # 1. ```<filepath>\n<content>\n```
+  # 2. **File: `<filepath>`**\n```language\n<content>\n```
+  # 3. ## <filepath>\n```\n<content>\n```
+  # 4. File: <filepath>\n<content blank line> (no fence) — only as last resort
+  export PROJECT_DIR="$PROJECT_DIR"
+  local applied_files=$(python3 <<'PYEOF''
 import re
 import os
+import sys
 
-output = """$output"""
-project_dir = "$PROJECT_DIR"
+with open("/tmp/brain-output-$$.txt".replace('$$', str(os.getpid())), 'r') as f:
+    output = f.read()
 
-# Match code blocks with file paths: \`\`\`<path>\\n<content>\\n\`\`\`
-# Path can include ./ prefix or relative paths
-pattern = r'\`\`\`([^\n\`]+)\n(.*?)\n\`\`\`'
-matches = re.findall(pattern, output, re.DOTALL)
-
+project_dir = os.environ.get('PROJECT_DIR', '.')
 applied = []
-for filepath, content in matches:
+
+# Common file extensions we expect
+VALID_EXTS = {'.ts', '.tsx', '.js', '.jsx', '.py', '.go', '.rs',
+              '.java', '.kt', '.swift', '.rb', '.php', '.html',
+              '.css', '.scss', '.json', '.yaml', '.yml', '.toml',
+              '.md', '.sql', '.sh', '.txt', '.env'}
+
+def is_valid_filepath(path):
+    """Reject language tags, accept only paths that look like files"""
+    if not path:
+        return False
+    if len(path) > 200:
+        return False
+    if '..' in path or path.startswith('/'):
+        return False
+    # Must have an extension OR a directory separator
+    has_ext = any(path.endswith(ext) for ext in VALID_EXTS)
+    has_dir = '/' in path
+    if not (has_ext or has_dir):
+        return False
+    # Reject known language identifiers
+    if path.lower() in {'typescript', 'javascript', 'python', 'go',
+                         'rust', 'json', 'yaml', 'toml', 'bash', 'shell',
+                         'sh', 'tsx', 'jsx', 'ts', 'js', 'py', 'rs',
+                         'html', 'css', 'sql', 'diff', 'plain', 'text'}:
+        return False
+    return True
+
+# Pattern 1: ```<path>\n<content>\n```
+pattern1 = r'```([^\n`]+)\n(.*?)\n```'
+for filepath, content in re.findall(pattern1, output, re.DOTALL):
     filepath = filepath.strip()
-    # Skip language-only tags (e.g., "typescript", "json")
-    if not ('/' in filepath or '.' in filepath) or len(filepath) > 200:
+    if not is_valid_filepath(filepath):
         continue
-    # Sanitize: must be relative, no .. traversal
-    if '..' in filepath or filepath.startswith('/'):
-        continue
-
     full_path = os.path.join(project_dir, filepath)
-    os.makedirs(os.path.dirname(full_path) if os.path.dirname(full_path) else '.', exist_ok=True)
-
+    dir_part = os.path.dirname(full_path)
+    if dir_part:
+        os.makedirs(dir_part, exist_ok=True)
     with open(full_path, 'w') as f:
         f.write(content)
     applied.append(filepath)
+
+# Pattern 2: **File: `<path>`**\n```...\n<content>\n```
+if not applied:
+    pattern2 = r'(?:\*\*)?(?:File|Path):\s*`([^`\n]+)`(?:\*\*)?\s*\n```[a-z]*\n(.*?)\n```'
+    for filepath, content in re.findall(pattern2, output, re.DOTALL | re.IGNORECASE):
+        filepath = filepath.strip()
+        if not is_valid_filepath(filepath):
+            continue
+        full_path = os.path.join(project_dir, filepath)
+        dir_part = os.path.dirname(full_path)
+        if dir_part:
+            os.makedirs(dir_part, exist_ok=True)
+        with open(full_path, 'w') as f:
+            f.write(content)
+        applied.append(filepath)
+
+# Pattern 3: Header followed by code block
+if not applied:
+    pattern3 = r'(?:^|\n)#+\s*(?:\*\*)?([^\n*]+\.[a-z]+)(?:\*\*)?\s*\n+```[a-z]*\n(.*?)\n```'
+    for filepath, content in re.findall(pattern3, output, re.DOTALL):
+        filepath = filepath.strip()
+        if not is_valid_filepath(filepath):
+            continue
+        full_path = os.path.join(project_dir, filepath)
+        dir_part = os.path.dirname(full_path)
+        if dir_part:
+            os.makedirs(dir_part, exist_ok=True)
+        with open(full_path, 'w') as f:
+            f.write(content)
+        applied.append(filepath)
 
 for f in applied:
     print(f)
 PYEOF
 )
+  rm -f "$out_file"
 
   if [[ -z "$applied_files" ]]; then
     warn "No file changes applied (AI may have output explanation only)"
