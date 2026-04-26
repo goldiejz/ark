@@ -125,6 +125,21 @@
       "lesson_after_n": 1,
       "auto_fix": "log-only",
       "description": "Ark wrote a phase dir without finding/creating real tasks — bypass of plan validation"
+    },
+    {
+      "id": "manual-gate-hit",
+      "regex": "(read\\s+-[pr]\\b|press\\s+any\\s+key|continue\\?|\\(y/N\\)|\\(Y/n\\))",
+      "regex_flags": "i",
+      "category": "logic-bug",
+      "severity": "critical",
+      "lesson_after_n": 1,
+      "auto_fix": "log-only",
+      "description": "Autonomous-path script hit interactive prompt — autonomy regression. Phase 2 banned manual gates in delivery-path scripts; any new occurrence must route through policy_* or ark_escalate.",
+      "tail_targets": [
+        ".planning/delivery-logs/*.log",
+        "$ARK_HOME/observability/dispatch-logs/*.log"
+      ],
+      "created_phase": "02-autonomy-policy"
     }
   ]
 }
