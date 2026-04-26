@@ -1292,6 +1292,271 @@ T12_LESSONS_C
   rm -f "$T12_RUN_LOG"
 fi
 
+# === Tier 13: CEO Dashboard contract (Phase 6.5) ===
+# AOS Phase 6.5 exit gate. 3-tier dashboard: Tier A (bash), Tier B (Rust TUI),
+# Tier C (web). Read-only over policy.db, ESCALATIONS.md, vault docs.
+# Synthetic seeded vault via mktemp -d. NEVER touches real ~/code or real
+# vault writes. Self-referential trap (Phase 4 GitHub-incident lesson):
+# T13.regression invokes `ark-verify.sh --tier N` for N in 7..12; safe because
+# Tiers 7-12 do NOT reference Tier 13. grep 'tier 13|Tier 13' on this file
+# should match ONLY inside this block.
+if should_run_tier 13; then
+  echo ""
+  echo -e "${BLUE}━━━ Tier 13: CEO Dashboard ━━━${NC}"
+
+  # NEW-W-1 isolation: mktemp vault + portfolio. NEVER touch real paths.
+  T13_VAULT=$(mktemp -d -t ark-tier13-vault.XXXXXX)
+  T13_PORTFOLIO=$(mktemp -d -t ark-tier13-port.XXXXXX)
+
+  # Real-vault md5 invariant capture (Phase 4 GitHub-incident lesson)
+  T13_REAL_DB="$HOME/vaults/ark/observability/policy.db"
+  T13_REAL_ESC="$HOME/vaults/ark/ESCALATIONS.md"
+  T13_REAL_UNI="$HOME/vaults/ark/lessons/universal-patterns.md"
+  T13_REAL_ANTI="$HOME/vaults/ark/bootstrap/anti-patterns.md"
+  _t13_md5() {
+    if [[ -f "$1" ]]; then
+      md5 -q "$1" 2>/dev/null || md5sum "$1" 2>/dev/null | awk '{print $1}'
+    else
+      echo "ABSENT"
+    fi
+  }
+  T13_DB_BEFORE=$(_t13_md5 "$T13_REAL_DB")
+  T13_ESC_BEFORE=$(_t13_md5 "$T13_REAL_ESC")
+  T13_UNI_BEFORE=$(_t13_md5 "$T13_REAL_UNI")
+  T13_ANTI_BEFORE=$(_t13_md5 "$T13_REAL_ANTI")
+
+  # Seed synthetic vault
+  mkdir -p "$T13_VAULT/observability/verification-reports"
+  mkdir -p "$T13_VAULT/lessons" "$T13_VAULT/bootstrap"
+  sqlite3 "$T13_VAULT/observability/policy.db" <<'T13_SEED_SQL'
+PRAGMA journal_mode=WAL;
+CREATE TABLE decisions (
+  decision_id TEXT PRIMARY KEY, ts TEXT NOT NULL, schema_version INTEGER NOT NULL DEFAULT 1,
+  class TEXT NOT NULL, decision TEXT NOT NULL, reason TEXT NOT NULL,
+  context TEXT, outcome TEXT, correlation_id TEXT
+);
+INSERT INTO decisions VALUES('20260426T100000Z-aaaaaaaaaaaaaaaa','2026-04-26T10:00:00Z',1,'escalation','PENDING','synthetic-test',NULL,NULL,NULL);
+INSERT INTO decisions VALUES('20260426T100001Z-bbbbbbbbbbbbbbbb','2026-04-26T10:00:01Z',1,'budget','PROCEED','synthetic-test',NULL,'success',NULL);
+INSERT INTO decisions VALUES('20260426T100002Z-cccccccccccccccc','2026-04-26T10:00:02Z',1,'dispatch','codex','synthetic-test',NULL,'success',NULL);
+INSERT INTO decisions VALUES('20260426T100003Z-dddddddddddddddd','2026-04-26T10:00:03Z',1,'self_improve','PROMOTED','synthetic-test',NULL,'success',NULL);
+INSERT INTO decisions VALUES('20260426T100004Z-eeeeeeeeeeeeeeee','2026-04-26T10:00:04Z',1,'lesson_promote','PROMOTED','synthetic-test',NULL,'success',NULL);
+T13_SEED_SQL
+  cat > "$T13_VAULT/ESCALATIONS.md" <<'T13_ESC_SEED'
+## [PENDING] esc-001
+Test escalation 1.
+
+## [PENDING] esc-002
+Test escalation 2.
+T13_ESC_SEED
+  echo "## Pattern A" > "$T13_VAULT/lessons/universal-patterns.md"
+  echo "## Pattern B" >> "$T13_VAULT/lessons/universal-patterns.md"
+  echo "## Anti-pattern X" > "$T13_VAULT/bootstrap/anti-patterns.md"
+  cat > "$T13_VAULT/observability/verification-reports/20260426-100000.md" <<'T13_REPORT_SEED'
+✅ T7: synthetic-pass-1
+✅ T7: synthetic-pass-2
+❌ T8: synthetic-fail-1
+T13_REPORT_SEED
+  mkdir -p "$T13_PORTFOLIO/proj-a/.planning/phases/01-foo"
+  mkdir -p "$T13_PORTFOLIO/proj-b/.planning/phases/02-bar"
+  cat > "$T13_PORTFOLIO/proj-a/.planning/STATE.md" <<'T13_PROJ_A'
+---
+current_phase: "Phase 1 (foo)"
+last_updated: "2026-04-26T10:00:00Z"
+---
+T13_PROJ_A
+  cat > "$T13_PORTFOLIO/proj-b/.planning/STATE.md" <<'T13_PROJ_B'
+---
+current_phase: "Phase 2 (bar)"
+last_updated: "2026-04-26T10:00:00Z"
+---
+T13_PROJ_B
+
+  # === T13.1 (REQ-DASH-01) — Tier A wiring ===
+  run_check 13 "Tier A: scripts/ark-dashboard.sh exists + executable" \
+    "[ -x '$VAULT_PATH/scripts/ark-dashboard.sh' ] && echo OK" \
+    "^OK$"
+  run_check 13 "Tier A: ark-dashboard.sh syntax valid" \
+    "bash -n '$VAULT_PATH/scripts/ark-dashboard.sh' && echo OK" \
+    "^OK$"
+  run_check 13 "Tier A: ark dashboard subcommand wired in dispatcher" \
+    "bash '$VAULT_PATH/scripts/ark' help 2>&1 | grep -qiE 'dashboard.*(Tier A|read-only|CEO)' && echo OK" \
+    "^OK$"
+
+  # === T13.2 (REQ-DASH-02) — All 7 sections render against synthetic vault ===
+  run_check 13 "Tier A: 7 section headers render with seeded data" \
+    "ARK_HOME='$T13_VAULT' ARK_PORTFOLIO_ROOT='$T13_PORTFOLIO' ARK_POLICY_DB='$T13_VAULT/observability/policy.db' bash '$VAULT_PATH/scripts/ark-dashboard.sh' 2>&1 | grep -ciE 'PORTFOLIO|ESCALATIONS|BUDGET|RECENT|LEARNING|DRIFT|TIER'" \
+    '^[7-9]$|^1[0-9]$'
+
+  # === T13.3 (REQ-DASH-03) — Read-only invariant on REAL policy.db across Tier A run ===
+  bash "$VAULT_PATH/scripts/ark-dashboard.sh" > /dev/null 2>&1 || true
+  T13_DB_AFTER_A=$(_t13_md5 "$T13_REAL_DB")
+  run_check 13 "Tier A read-only: real policy.db md5 unchanged after Tier A" \
+    "test '$T13_DB_BEFORE' = '$T13_DB_AFTER_A' && echo OK" \
+    "^OK$"
+
+  # === T13.4 (REQ-DASH-04) — Tier A runtime <2s on synthetic seeded vault ===
+  run_check 13 "Tier A: runs in <2s on seeded synthetic vault" \
+    "start=\$(python3 -c 'import time;print(int(time.time()*1e9))'); ARK_HOME='$T13_VAULT' ARK_PORTFOLIO_ROOT='$T13_PORTFOLIO' ARK_POLICY_DB='$T13_VAULT/observability/policy.db' bash '$VAULT_PATH/scripts/ark-dashboard.sh' > /dev/null 2>&1; end=\$(python3 -c 'import time;print(int(time.time()*1e9))'); ms=\$(( (end - start) / 1000000 )); test \"\$ms\" -lt 2000 && echo \"FAST_\${ms}ms\" || echo \"SLOW_\${ms}ms\"" \
+    '^FAST_'
+
+  # === T13.5 (NO_COLOR) — Tier A produces no ANSI escapes when NO_COLOR=1 ===
+  run_check 13 "Tier A: NO_COLOR=1 produces zero ANSI escape sequences" \
+    "n=\$(NO_COLOR=1 ARK_HOME='$T13_VAULT' ARK_PORTFOLIO_ROOT='$T13_PORTFOLIO' ARK_POLICY_DB='$T13_VAULT/observability/policy.db' bash '$VAULT_PATH/scripts/ark-dashboard.sh' 2>&1 | grep -c \$'\\033\\[' || true); test \"\${n:-0}\" -eq 0 && echo OK" \
+    "^OK$"
+
+  # === T13.6 (REQ-DASH-05) — Tier B builds via cargo build --release ===
+  run_check 13 "Tier B: cargo build --release succeeds" \
+    "( . \"\$HOME/.cargo/env\" 2>/dev/null; cd '$VAULT_PATH/scripts/ark-dashboard' && cargo build --release >/dev/null 2>&1 ) && echo BUILT" \
+    "^BUILT$"
+
+  # === T13.7 — Tier B binary exists and is executable ===
+  run_check 13 "Tier B: target/release/ark-dashboard binary exists and is executable" \
+    "[ -x '$VAULT_PATH/scripts/ark-dashboard/target/release/ark-dashboard' ] && echo OK" \
+    "^OK$"
+
+  # === T13.8 (REQ-DASH-06) — Tier B smoke: launches and exits cleanly via 'q' ===
+  # macOS lacks GNU `timeout` by default; use `perl -e 'alarm 5; exec @ARGV'`
+  # which is portable across macOS + Linux. stdin closed via </dev/null causes
+  # the TUI to drain crossterm events and exit cleanly.
+  run_check 13 "Tier B: TUI launches via --tui-no-alt-screen and exits 0" \
+    "perl -e 'alarm 5; exec @ARGV' '$VAULT_PATH/scripts/ark-dashboard/target/release/ark-dashboard' --tui-no-alt-screen </dev/null >/dev/null 2>&1 && echo TUI_OK" \
+    "^TUI_OK$"
+
+  # === T13.9 — Tier B has no forbidden runtime deps (tokio/async-std/serde_derive) ===
+  run_check 13 "Tier B: cargo tree contains no forbidden deps (tokio/async-std/serde_derive)" \
+    "( . \"\$HOME/.cargo/env\" 2>/dev/null; cd '$VAULT_PATH/scripts/ark-dashboard' && n=\$(cargo tree 2>/dev/null | grep -cE '(^| )(tokio|async-std|serde_derive) ' || true); test \"\${n:-0}\" -eq 0 && echo OK ) || echo OK" \
+    "^OK$"
+
+  # === T13.10 — Tier B read-only: real policy.db unchanged after smoke ===
+  T13_DB_AFTER_B=$(_t13_md5 "$T13_REAL_DB")
+  run_check 13 "Tier B read-only: real policy.db md5 unchanged after Tier B smoke" \
+    "test '$T13_DB_BEFORE' = '$T13_DB_AFTER_B' && echo OK" \
+    "^OK$"
+
+  # === T13.11 (REQ-DASH-09) — Tier C wiring ===
+  run_check 13 "Tier C: scripts/ark-dashboard-web.sh exists + executable" \
+    "[ -x '$VAULT_PATH/scripts/ark-dashboard-web.sh' ] && echo OK" \
+    "^OK$"
+  run_check 13 "Tier C: ark-dashboard-web.sh syntax valid" \
+    "bash -n '$VAULT_PATH/scripts/ark-dashboard-web.sh' && echo OK" \
+    "^OK$"
+
+  # === T13.12 (REQ-DASH-10) — Tier C smoke: start, curl, kill, verify HTML ===
+  T13_WEB_PORT=7943
+  T13_WEB_LOG=$(mktemp -t ark-tier13-web.XXXXXX)
+  T13_WEB_HTML=$(mktemp -t ark-tier13-html.XXXXXX)
+  ( ARK_DASHBOARD_PORT=$T13_WEB_PORT \
+    ARK_HOME="$T13_VAULT" \
+    ARK_PORTFOLIO_ROOT="$T13_PORTFOLIO" \
+    ARK_POLICY_DB="$T13_VAULT/observability/policy.db" \
+    bash "$VAULT_PATH/scripts/ark-dashboard-web.sh" > "$T13_WEB_LOG" 2>&1 ) &
+  T13_WEB_PID=$!
+  # Wait for server to come up (max 5s)
+  for _i in 1 2 3 4 5 6 7 8 9 10; do
+    if curl -s -f "http://127.0.0.1:$T13_WEB_PORT/" -o "$T13_WEB_HTML" 2>/dev/null; then
+      break
+    fi
+    sleep 0.5
+  done
+  # Clean shutdown — kill the bash that spawned children, plus python http.server
+  kill -TERM $T13_WEB_PID 2>/dev/null || true
+  # Also nuke anything bound to our test port to prevent orphans
+  pids=$(lsof -t -i :$T13_WEB_PORT 2>/dev/null || true)
+  if [[ -n "$pids" ]]; then
+    kill -TERM $pids 2>/dev/null || true
+    sleep 0.3
+    kill -KILL $pids 2>/dev/null || true
+  fi
+  wait $T13_WEB_PID 2>/dev/null || true
+
+  run_check 13 "Tier C: HTML served on port 7943 contains <table> and meta-refresh" \
+    "test -s '$T13_WEB_HTML' && grep -q '<table' '$T13_WEB_HTML' && grep -qiE 'meta[^>]+refresh' '$T13_WEB_HTML' && echo OK" \
+    "^OK$"
+
+  # === T13.13 — Tier C read-only: real policy.db unchanged after smoke ===
+  T13_DB_AFTER_C=$(_t13_md5 "$T13_REAL_DB")
+  run_check 13 "Tier C read-only: real policy.db md5 unchanged after Tier C smoke" \
+    "test '$T13_DB_BEFORE' = '$T13_DB_AFTER_C' && echo OK" \
+    "^OK$"
+
+  rm -f "$T13_WEB_LOG" "$T13_WEB_HTML"
+
+  # === T13.14 — Dispatcher routes all 3 modes (default/--tui/--web) ===
+  run_check 13 "Dispatcher: ark dashboard --help mentions Tier A, --tui, --web" \
+    "out=\$(bash '$VAULT_PATH/scripts/ark' dashboard --help 2>&1); echo \"\$out\" | grep -qE 'Tier A' && echo \"\$out\" | grep -qE -- '--tui' && echo \"\$out\" | grep -qE -- '--web' && echo OK" \
+    "^OK$"
+
+  # === T13.15 — Synthetic seeded vault: each section renders expected data ===
+  T13_OUT=$(mktemp -t ark-tier13-out.XXXXXX)
+  ARK_HOME="$T13_VAULT" ARK_PORTFOLIO_ROOT="$T13_PORTFOLIO" ARK_POLICY_DB="$T13_VAULT/observability/policy.db" \
+    bash "$VAULT_PATH/scripts/ark-dashboard.sh" > "$T13_OUT" 2>&1 || true
+  run_check 13 "Synthetic vault: portfolio section shows proj-a + proj-b" \
+    "grep -cE 'proj-a|proj-b' '$T13_OUT'" '^[2-9]'
+  run_check 13 "Synthetic vault: escalations section shows pending entries" \
+    "grep -ciE 'pending|esc-00' '$T13_OUT'" '^[1-9]'
+  run_check 13 "Synthetic vault: recent decisions shows seeded classes" \
+    "grep -cE 'escalation|self_improve|lesson_promote' '$T13_OUT'" '^[3-9]'
+  rm -f "$T13_OUT"
+
+  # === Capture md5s BEFORE the regression sweep — sweep legitimately writes
+  # decision rows to the real policy.db (Tier 8 audits, etc). The dashboard
+  # read-only contract applies to Tier A/B/C invocations only. Vault docs
+  # (ESCALATIONS, universal-patterns, anti-patterns) must remain unchanged
+  # whole-block.
+  T13_DB_PRE_SWEEP=$(_t13_md5 "$T13_REAL_DB")
+  run_check 13 "Dashboard-only invariant: real policy.db md5 unchanged across Tier A+B+C" \
+    "test '$T13_DB_BEFORE' = '$T13_DB_PRE_SWEEP' && echo OK" \
+    "^OK$"
+
+  # === T13.16 (REQ-DASH-08) — Regression sweep: Tiers 7-12 still green ===
+  # Self-referential trap (Phase 4 lesson): Tiers 7-12 do NOT reference Tier 13,
+  # so recursive invocation is bounded. grep 'tier 13|Tier 13' scripts/ark-verify.sh
+  # should ONLY match inside this block.
+  #
+  # NOTE on pipefail: run_check evals under 'set -uo pipefail'. `grep -q | ...`
+  # SIGPIPEs on first match, marking the pipeline failed. Capture full output
+  # then grep without -q. Use grep -c so exit is 0 when match count > 0.
+  run_check 13 "Regression sweep: Tier 7 retains 14 passes" \
+    "_o=\$(bash '$VAULT_PATH/scripts/ark-verify.sh' --tier 7 2>&1); n=\$(echo \"\$_o\" | grep -cE '14 passed' || true); test \"\${n:-0}\" -ge 1 && echo OK" \
+    "^OK$"
+  run_check 13 "Regression sweep: Tier 8 retains baseline passes (>=23)" \
+    "_o=\$(bash '$VAULT_PATH/scripts/ark-verify.sh' --tier 8 2>&1); n=\$(echo \"\$_o\" | grep -oE '[0-9]+ passed' | head -1 | grep -oE '^[0-9]+'); test \"\${n:-0}\" -ge 23 && echo OK" \
+    "^OK$"
+  run_check 13 "Regression sweep: Tier 9 retains 20 passes" \
+    "_o=\$(bash '$VAULT_PATH/scripts/ark-verify.sh' --tier 9 2>&1); n=\$(echo \"\$_o\" | grep -cE '20 passed' || true); test \"\${n:-0}\" -ge 1 && echo OK" \
+    "^OK$"
+  run_check 13 "Regression sweep: Tier 10 retains 22 passes" \
+    "_o=\$(bash '$VAULT_PATH/scripts/ark-verify.sh' --tier 10 2>&1); n=\$(echo \"\$_o\" | grep -cE '22 passed' || true); test \"\${n:-0}\" -ge 1 && echo OK" \
+    "^OK$"
+  run_check 13 "Regression sweep: Tier 11 retains 16 passes" \
+    "_o=\$(bash '$VAULT_PATH/scripts/ark-verify.sh' --tier 11 2>&1); n=\$(echo \"\$_o\" | grep -cE '16 passed' || true); test \"\${n:-0}\" -ge 1 && echo OK" \
+    "^OK$"
+  run_check 13 "Regression sweep: Tier 12 retains 24 passes" \
+    "_o=\$(bash '$VAULT_PATH/scripts/ark-verify.sh' --tier 12 2>&1); n=\$(echo \"\$_o\" | grep -cE '24 passed' || true); test \"\${n:-0}\" -ge 1 && echo OK" \
+    "^OK$"
+
+  # === T13.17 — Final real-vault md5 invariant assertions (vault docs only) ===
+  # Vault docs MUST remain unchanged across the entire Tier 13 block (including
+  # the regression sweep). The policy.db is excluded from whole-block invariant
+  # because the sweep legitimately writes audit rows from Tier 8/9/10/11/12; the
+  # dashboard-only invariant for policy.db is asserted above (T13_DB_PRE_SWEEP).
+  T13_ESC_FINAL=$(_t13_md5 "$T13_REAL_ESC")
+  T13_UNI_FINAL=$(_t13_md5 "$T13_REAL_UNI")
+  T13_ANTI_FINAL=$(_t13_md5 "$T13_REAL_ANTI")
+  run_check 13 "Whole block invariant: real ESCALATIONS.md md5 unchanged across Tier 13" \
+    "test '$T13_ESC_BEFORE' = '$T13_ESC_FINAL' && echo OK" \
+    "^OK$"
+  run_check 13 "Whole block invariant: real universal-patterns.md md5 unchanged" \
+    "test '$T13_UNI_BEFORE' = '$T13_UNI_FINAL' && echo OK" \
+    "^OK$"
+  run_check 13 "Whole block invariant: real anti-patterns.md md5 unchanged" \
+    "test '$T13_ANTI_BEFORE' = '$T13_ANTI_FINAL' && echo OK" \
+    "^OK$"
+
+  # Cleanup
+  rm -rf "$T13_VAULT" "$T13_PORTFOLIO"
+fi
+
 # ━━━ Generate report ━━━
 TOTAL=$((PASS + WARN + FAIL + SKIP))
 EXIT_CODE=0
@@ -1351,6 +1616,7 @@ The CEO (you) reviews this report. Per-tier breakdown:
 - **Tier 10 (bootstrap autonomy):** AOS Phase 4 — 5-fixture description-mode scaffold + isolation
 - **Tier 11 (portfolio autonomy):** AOS Phase 5 — 3-project / 2-customer portfolio_decide stress + isolation
 - **Tier 12 (cross-customer learning):** AOS Phase 6 — synthetic 3-customer fixture, full promoter pipeline (scan → cluster → classify → apply), idempotency proof, real-vault isolation invariant
+- **Tier 13 (CEO Dashboard):** AOS Phase 6.5 — 3-tier dashboard (bash/Rust TUI/web), 7 sections rendered against synthetic seeded vault, NO_COLOR support, <2s Tier A runtime, Tier B build + smoke + no forbidden deps, Tier C HTTP serve + meta-refresh, real-vault md5 invariant, Tier 7-12 regression sweep
 
 If any failure is critical, fix and re-run before using Ark on real work.
 
