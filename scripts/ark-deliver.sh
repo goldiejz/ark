@@ -2,10 +2,13 @@
 # ark deliver — autonomous project delivery from design to deployed
 #
 # Usage:
-#   ark deliver                          # Run full delivery in current project
+#   ark deliver                          # If cwd is a project: full delivery here. Else: portfolio engine picks winner.
+#   ark deliver --phase N                # Run only phase N (cwd must be a project)
 #   ark deliver --from-spec /path/spec   # Start from brainstorm output
-#   ark deliver --phase N                # Run only phase N
 #   ark deliver --resume                 # Continue from last successful phase
+#
+# Environment:
+#   ARK_PORTFOLIO_ROOT  Root for portfolio scan in no-args mode (default: $HOME/code)
 #
 # What it does:
 # 1. Reads .planning/PROJECT.md + ROADMAP.md (must exist)
@@ -545,10 +548,14 @@ main() {
   if [[ "$MODE" == "help" ]]; then
     cat <<EOF
 Usage:
-  ark deliver                  # Full autonomous delivery
+  ark deliver                  # If cwd is a project: full delivery here.
+                               # Else: portfolio engine picks winner (REQ-AOS-24).
   ark deliver --resume         # Continue from last successful phase
-  ark deliver --phase N        # Run only phase N
+  ark deliver --phase N        # Run only phase N (cwd must be a project)
   ark deliver --from-spec X    # Start from brainstorm spec file
+
+Environment:
+  ARK_PORTFOLIO_ROOT  Root for portfolio scan in no-args mode (default: \$HOME/code)
 
 What happens:
   1. Reads .planning/ROADMAP.md
@@ -567,6 +574,56 @@ Integrates with:
 EOF
     exit 0
   fi
+
+  # === Phase 5 (REQ-AOS-24): no-args portfolio routing ===
+  # If invoked with NO flags AND cwd is NOT a project, source the portfolio
+  # priority engine, pick a winner, cd into it, and continue normal delivery.
+  # Project detection (any of these makes cwd "a project"):
+  #   .planning/STATE.md  |  .planning/policy.yml  |  .planning/PROJECT.md  |  .planning/ROADMAP.md
+  # Backward compat (REQ-AOS-28): any flag set OR cwd is a project → no-op.
+  if [[ "$MODE" == "full" ]] \
+     && [[ -z "$FROM_SPEC" ]] \
+     && [[ -z "$PHASE_NUM" ]] \
+     && [[ "$RESUME" == "false" ]] \
+     && [[ ! -f "$PROJECT_DIR/.planning/STATE.md" ]] \
+     && [[ ! -f "$PROJECT_DIR/.planning/policy.yml" ]] \
+     && [[ ! -f "$PROJECT_DIR/.planning/PROJECT.md" ]] \
+     && [[ ! -f "$PROJECT_DIR/.planning/ROADMAP.md" ]]; then
+
+    log INFO "No project in cwd — routing via portfolio priority engine..."
+
+    # Source the portfolio engine (graceful degradation if missing).
+    # The library uses Bash-3 array idioms that are NOT `set -u`-safe; we
+    # temporarily disable -u for the source + decide call, then restore it.
+    if [[ -f "$VAULT_PATH/scripts/ark-portfolio-decide.sh" ]]; then
+      set +u
+      # shellcheck disable=SC1091
+      source "$VAULT_PATH/scripts/ark-portfolio-decide.sh"
+    else
+      log ERROR "ark-portfolio-decide.sh not found in vault; cannot route portfolio"
+      exit 1
+    fi
+
+    # Decide. portfolio_decide audit-logs SELECTED / DEFERRED_* / NO_CANDIDATE.
+    WINNER="$(portfolio_decide "${ARK_PORTFOLIO_ROOT:-$HOME/code}")"
+    set -u  # restore strict-mode after sourced library completes
+
+    if [[ -z "$WINNER" ]]; then
+      log WARN "No portfolio candidate selected — see ESCALATIONS.md (audit logged)"
+      exit 1
+    fi
+
+    if [[ ! -d "$WINNER" ]]; then
+      log ERROR "Portfolio winner path does not exist: $WINNER"
+      exit 1
+    fi
+
+    log OK "Portfolio winner: $WINNER"
+    cd "$WINNER" || { log ERROR "cd $WINNER failed"; exit 1; }
+    PROJECT_DIR="$WINNER"
+    # Fall through — winner is now cwd; preflight + normal delivery proceeds.
+  fi
+  # === end Phase 5 portfolio branch ===
 
   preflight
 

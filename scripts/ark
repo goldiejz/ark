@@ -183,7 +183,7 @@ Commands:
                   Flag mode (backward compatible):
                     ark create <name> --type <t> --stack <s> --deploy <d> --customer <c>
                   See 'ark create --help' for full options.
-    deliver     Run autonomous delivery (team-validated per phase)
+    deliver     Run autonomous delivery. With no args from outside a project, picks portfolio winner.
     promote     Deploy to staging or production (production requires --confirm)
 
   PROJECT MANAGEMENT:
@@ -217,6 +217,7 @@ Commands:
 
 Environment:
   ARK_HOME            Path to vault (default: ~/vaults/ark)
+  ARK_PORTFOLIO_ROOT  Root for 'ark deliver' no-args portfolio scan (default: ~/code)
   ARK_CREATE_GITHUB   When 'true', 'ark create' provisions a real GitHub repo
                       via 'gh repo create'. Default off — production
                       side-effect gate (see Phase 4 04-04 incident report).
