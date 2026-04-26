@@ -1,19 +1,25 @@
 #!/usr/bin/env bash
 # brain create — scaffold a new project from cached templates
 #
-# Usage:
-#   brain create <project-name> --type <type> --customer <customer> [--path <path>]
+# Three independent dimensions:
+#   --type    what the project DOES (service-desk, revops, ops-intel, custom, ...)
+#   --stack   what TOOLS it uses (vite-react-hono, nextjs, fastapi, none, ...)
+#   --deploy  where it RUNS (cloudflare-workers, vercel, aws-lambda, none, ...)
 #
-# Types: service-desk | revops | ops-intelligence | custom
+# Usage:
+#   brain create <name> --type <type> --customer <customer> [options]
+#
+# Options:
+#   --stack <stack>     Technical stack (auto-detected if omitted)
+#   --deploy <target>   Deployment target (auto-detected if omitted)
+#   --path <dir>        Where to create (default: ~/code/)
 #
 # What it does:
-# 1. Creates project directory at <path>/<project-name>
-# 2. Copies cached templates: CLAUDE.md, .planning/, src/lib/rbac.ts, etc.
-# 3. Substitutes variables (project-name, customer, type)
-# 4. Initializes git, installs dependencies
-# 5. Creates GitHub repo (if gh CLI available)
-# 6. Records decision to brain
-# 7. Returns: project ready for `brain deliver` or development
+# 1. Creates project directory
+# 2. Composes templates: core (CLAUDE.md, .planning/, RBAC) + stack + deploy
+# 3. Substitutes variables (project-name, customer, type, stack, deploy)
+# 4. Initializes git, optional GitHub repo
+# 5. Records decision to brain (Phase 6 learns successful combos)
 
 set -uo pipefail
 
@@ -23,25 +29,49 @@ PROJECT_NAME=""
 PROJECT_TYPE=""
 CUSTOMER=""
 PROJECT_PATH="$HOME/code"
+STACK=""
+DEPLOY=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --type) PROJECT_TYPE="$2"; shift 2 ;;
     --customer) CUSTOMER="$2"; shift 2 ;;
     --path) PROJECT_PATH="$2"; shift 2 ;;
+    --stack) STACK="$2"; shift 2 ;;
+    --deploy) DEPLOY="$2"; shift 2 ;;
     --help|-h)
       cat <<EOF
-Usage: brain create <name> --type <type> --customer <customer> [--path <dir>]
+Usage: brain create <name> --type <type> --customer <customer> [options]
 
-Types:
-  service-desk      - ITIL service desk (Cloudflare Workers + Vite + D1)
-  revops            - RevOps platform (Cloudflare Pages + Vite + D1)
-  ops-intelligence  - Ops dashboard (Next.js on Workers)
-  custom            - Custom project (minimal scaffold)
+Required:
+  --type      service-desk | revops | ops-intelligence | marketplace |
+              internal-tool | cli-tool | library | static-site | custom
+  --customer  Customer name (e.g., acme, strategix)
+
+Optional:
+  --stack     vite-react-hono | nextjs | nextjs-on-workers | astro |
+              tanstack-start | express-node | fastapi | django | rails |
+              go-stdlib | rust-axum | swift-vapor | static-html | node-cli
+              (auto-detected from existing files; asks if ambiguous)
+
+  --deploy    cloudflare-workers | cloudflare-pages | vercel | netlify |
+              aws-lambda | aws-ecs | gcp-run | azure-app | fly | railway |
+              render | github-pages | docker-self-hosted | kubernetes | none
+              (auto-detected from project type if omitted)
+
+  --path      Where to create the project (default: ~/code/)
 
 Examples:
-  brain create acme-service-desk --type service-desk --customer acme
-  brain create internal-tool --type custom --customer strategix --path ~/work
+  brain create acme-sd --type service-desk --customer acme \\
+    --stack vite-react-hono --deploy cloudflare-workers
+
+  brain create my-cli --type cli-tool --customer me \\
+    --stack node-cli --deploy none
+
+  brain create internal --type internal-tool --customer strategix \\
+    --stack nextjs --deploy vercel
+
+See ~/vaults/automation-brain/templates/STACKS.md for full list.
 EOF
       exit 0
       ;;
@@ -280,49 +310,37 @@ EOF
 
 echo -e "  ${GREEN}✅${NC} tasks/ created"
 
-# === Step 3: Type-specific scaffolding ===
-case "$PROJECT_TYPE" in
-  service-desk|revops)
-    # Cloudflare Workers + Vite + D1
-    cat > "$PROJECT_DIR/package.json" <<EOF
-{
-  "name": "$PROJECT_NAME",
-  "version": "0.0.1",
-  "type": "module",
-  "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview",
-    "deploy": "wrangler deploy",
-    "test": "vitest"
-  },
-  "dependencies": {
-    "hono": "^4.0.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0"
-  },
-  "devDependencies": {
-    "@cloudflare/vite-plugin": "^1.0.0",
-    "@types/node": "^25.0.0",
-    "typescript": "^6.0.0",
-    "vite": "^7.0.0",
-    "vitest": "^3.0.0",
-    "wrangler": "^4.0.0"
-  }
-}
-EOF
-    cat > "$PROJECT_DIR/wrangler.toml" <<EOF
-name = "$PROJECT_NAME"
-main = "src/worker.ts"
-compatibility_date = "$(date +%Y-%m-%d)"
+# === Step 3: Resolve stack + deploy (auto-detect or use defaults) ===
 
-[[d1_databases]]
-binding = "DB"
-database_name = "$PROJECT_NAME-db"
-database_id = "TODO_ADD_ID"
-EOF
-    mkdir -p "$PROJECT_DIR/src/lib" "$PROJECT_DIR/src/db"
-    cat > "$PROJECT_DIR/src/lib/rbac.ts" <<EOF
+# Sensible defaults per project type if user didn't specify
+if [[ -z "$STACK" ]]; then
+  case "$PROJECT_TYPE" in
+    service-desk|revops) STACK="vite-react-hono" ;;
+    ops-intelligence)    STACK="nextjs" ;;
+    marketplace)         STACK="nextjs" ;;
+    internal-tool)       STACK="nextjs" ;;
+    cli-tool)            STACK="node-cli" ;;
+    library)             STACK="node-lib" ;;
+    static-site)         STACK="static-html" ;;
+    custom|*)            STACK="custom" ;;
+  esac
+  echo -e "  ${YELLOW}ℹ${NC}  Stack defaulted to: $STACK"
+fi
+
+if [[ -z "$DEPLOY" ]]; then
+  case "$PROJECT_TYPE" in
+    cli-tool|library|custom) DEPLOY="none" ;;
+    static-site)             DEPLOY="github-pages" ;;
+    *)                       DEPLOY="docker-self-hosted" ;;
+  esac
+  echo -e "  ${YELLOW}ℹ${NC}  Deploy defaulted to: $DEPLOY (override with --deploy)"
+fi
+
+# === Step 4: Apply universal core (RBAC, currency discipline) ===
+mkdir -p "$PROJECT_DIR/src/lib" "$PROJECT_DIR/src/db"
+
+# Universal RBAC pattern — works in any framework
+cat > "$PROJECT_DIR/src/lib/rbac.ts" <<EOF
 // Centralized RBAC — single source of truth
 // Lesson L-018: Never inline role arrays in routes/components
 
@@ -339,21 +357,82 @@ export function requireRole(userRole: Role, requiredRole: Role): boolean {
   return ROLES[userRole]?.includes(requiredRole) ?? false;
 }
 EOF
-    cat > "$PROJECT_DIR/src/db/schema.ts" <<EOF
-// D1 schema — Drizzle ORM
-// Convention: money columns end in _zar/_usd, duration columns end in _minutes/_seconds
+
+# Universal schema convention notes
+cat > "$PROJECT_DIR/src/db/schema.ts" <<EOF
+// Schema conventions (apply to any DB):
+// - Money columns end in _zar or _usd (never unsuffixed)
+// - Duration columns end in _minutes or _seconds (never unsuffixed)
+// - Every business table has tenant_id (multi-tenant projects)
+// - Every business table has created_at, created_by, updated_at, updated_by
+// - Soft delete via deleted_at (no hard deletes on tickets/timesheets/etc.)
 EOF
-    echo -e "  ${GREEN}✅${NC} Cloudflare Workers + Vite scaffolding"
+
+# === Step 5: Apply STACK-specific scaffolding ===
+case "$STACK" in
+  vite-react-hono)
+    cat > "$PROJECT_DIR/package.json" <<EOF
+{
+  "name": "$PROJECT_NAME",
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest"
+  },
+  "dependencies": {
+    "hono": "^4.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.0",
+    "typescript": "^6.0.0",
+    "vite": "^7.0.0",
+    "vitest": "^3.0.0"
+  }
+}
+EOF
+    echo -e "  ${GREEN}✅${NC} Vite + React + Hono scaffold"
     ;;
-  ops-intelligence)
+
+  nextjs)
     cat > "$PROJECT_DIR/package.json" <<EOF
 {
   "name": "$PROJECT_NAME",
   "version": "0.0.1",
   "scripts": {
     "dev": "next dev",
-    "build": "next build && opennextjs-cloudflare",
-    "deploy": "opennextjs-cloudflare && wrangler deploy"
+    "build": "next build",
+    "start": "next start",
+    "test": "vitest"
+  },
+  "dependencies": {
+    "next": "^16.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.0",
+    "@types/react": "^19.0.0",
+    "typescript": "^6.0.0",
+    "vitest": "^3.0.0"
+  }
+}
+EOF
+    echo -e "  ${GREEN}✅${NC} Next.js scaffold"
+    ;;
+
+  nextjs-on-workers)
+    cat > "$PROJECT_DIR/package.json" <<EOF
+{
+  "name": "$PROJECT_NAME",
+  "version": "0.0.1",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build && opennextjs-cloudflare"
   },
   "dependencies": {
     "next": "^16.0.0",
@@ -361,12 +440,250 @@ EOF
   },
   "devDependencies": {
     "@opennextjs/cloudflare": "^1.0.0",
-    "typescript": "^6.0.0",
-    "wrangler": "^4.0.0"
+    "typescript": "^6.0.0"
   }
 }
 EOF
-    echo -e "  ${GREEN}✅${NC} Next.js on Workers scaffolding"
+    echo -e "  ${GREEN}✅${NC} Next.js on Workers scaffold"
+    ;;
+
+  express-node)
+    cat > "$PROJECT_DIR/package.json" <<EOF
+{
+  "name": "$PROJECT_NAME",
+  "version": "0.0.1",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "vitest"
+  },
+  "dependencies": {
+    "express": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^25.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^6.0.0",
+    "vitest": "^3.0.0"
+  }
+}
+EOF
+    echo -e "  ${GREEN}✅${NC} Express + Node scaffold"
+    ;;
+
+  fastapi)
+    cat > "$PROJECT_DIR/pyproject.toml" <<EOF
+[project]
+name = "$PROJECT_NAME"
+version = "0.0.1"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.110.0",
+  "uvicorn>=0.27.0",
+  "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.5", "mypy>=1.10"]
+EOF
+    echo -e "  ${GREEN}✅${NC} FastAPI scaffold"
+    ;;
+
+  django)
+    cat > "$PROJECT_DIR/pyproject.toml" <<EOF
+[project]
+name = "$PROJECT_NAME"
+version = "0.0.1"
+requires-python = ">=3.11"
+dependencies = ["Django>=5.0", "psycopg[binary]>=3.0"]
+
+[project.optional-dependencies]
+dev = ["pytest-django>=4.5", "ruff>=0.5"]
+EOF
+    echo -e "  ${GREEN}✅${NC} Django scaffold"
+    ;;
+
+  go-stdlib)
+    cat > "$PROJECT_DIR/go.mod" <<EOF
+module $PROJECT_NAME
+
+go 1.22
+EOF
+    echo -e "  ${GREEN}✅${NC} Go stdlib scaffold"
+    ;;
+
+  rust-axum)
+    cat > "$PROJECT_DIR/Cargo.toml" <<EOF
+[package]
+name = "$PROJECT_NAME"
+version = "0.0.1"
+edition = "2024"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+EOF
+    echo -e "  ${GREEN}✅${NC} Rust + Axum scaffold"
+    ;;
+
+  node-cli)
+    cat > "$PROJECT_DIR/package.json" <<EOF
+{
+  "name": "$PROJECT_NAME",
+  "version": "0.0.1",
+  "type": "module",
+  "bin": {
+    "$PROJECT_NAME": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.0",
+    "typescript": "^6.0.0",
+    "vitest": "^3.0.0"
+  }
+}
+EOF
+    echo -e "  ${GREEN}✅${NC} Node CLI scaffold"
+    ;;
+
+  static-html)
+    cat > "$PROJECT_DIR/index.html" <<EOF
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>$PROJECT_NAME</title>
+</head>
+<body>
+  <h1>$PROJECT_NAME</h1>
+</body>
+</html>
+EOF
+    echo -e "  ${GREEN}✅${NC} Static HTML scaffold"
+    ;;
+
+  custom|*)
+    cat > "$PROJECT_DIR/package.json" <<EOF
+{
+  "name": "$PROJECT_NAME",
+  "version": "0.0.1"
+}
+EOF
+    echo -e "  ${GREEN}✅${NC} Minimal scaffold (custom stack)"
+    ;;
+esac
+
+# === Step 6: Apply DEPLOYMENT-specific config ===
+case "$DEPLOY" in
+  cloudflare-workers)
+    cat > "$PROJECT_DIR/wrangler.toml" <<EOF
+name = "$PROJECT_NAME"
+main = "src/worker.ts"
+compatibility_date = "$(date +%Y-%m-%d)"
+EOF
+    echo -e "  ${GREEN}✅${NC} Cloudflare Workers deployment config"
+    echo -e "  ${YELLOW}ℹ${NC}  After delivery, configure D1/KV bindings + database_id"
+    ;;
+
+  cloudflare-pages)
+    cat > "$PROJECT_DIR/wrangler.toml" <<EOF
+name = "$PROJECT_NAME"
+pages_build_output_dir = "dist"
+EOF
+    echo -e "  ${GREEN}✅${NC} Cloudflare Pages deployment config"
+    ;;
+
+  vercel)
+    cat > "$PROJECT_DIR/vercel.json" <<EOF
+{
+  "version": 2
+}
+EOF
+    echo -e "  ${GREEN}✅${NC} Vercel deployment config"
+    ;;
+
+  netlify)
+    cat > "$PROJECT_DIR/netlify.toml" <<EOF
+[build]
+  publish = "dist"
+EOF
+    echo -e "  ${GREEN}✅${NC} Netlify deployment config"
+    ;;
+
+  fly)
+    cat > "$PROJECT_DIR/fly.toml" <<EOF
+app = "$PROJECT_NAME"
+primary_region = "iad"
+EOF
+    echo -e "  ${GREEN}✅${NC} Fly.io deployment config"
+    ;;
+
+  docker-self-hosted)
+    cat > "$PROJECT_DIR/Dockerfile" <<EOF
+# TODO: Choose base image based on stack
+# Node:    FROM node:22-alpine
+# Python:  FROM python:3.12-slim
+# Go:      FROM golang:1.22-alpine
+# Rust:    FROM rust:1.75
+WORKDIR /app
+COPY . .
+# TODO: Add build/install commands
+# CMD ["npm", "start"]
+EOF
+    cat > "$PROJECT_DIR/docker-compose.yml" <<EOF
+services:
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+EOF
+    echo -e "  ${GREEN}✅${NC} Docker self-hosted deployment config"
+    ;;
+
+  github-pages)
+    mkdir -p "$PROJECT_DIR/.github/workflows"
+    cat > "$PROJECT_DIR/.github/workflows/deploy.yml" <<EOF
+name: Deploy to GitHub Pages
+on:
+  push:
+    branches: [main]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v4
+      - uses: actions/upload-pages-artifact@v3
+        with: { path: '.' }
+      - uses: actions/deploy-pages@v4
+EOF
+    echo -e "  ${GREEN}✅${NC} GitHub Pages deployment workflow"
+    ;;
+
+  aws-lambda|aws-ecs|gcp-run|azure-app|kubernetes|railway|render)
+    cat > "$PROJECT_DIR/.deploy/$DEPLOY.md" <<EOF
+# Deployment: $DEPLOY
+
+[TODO: Configure $DEPLOY deployment]
+
+Brain has not yet templated this deployment target.
+Run /brain phase-6 to learn from this project once deployment is set up.
+EOF
+    mkdir -p "$PROJECT_DIR/.deploy"
+    mv "$PROJECT_DIR/.deploy/$DEPLOY.md" "$PROJECT_DIR/.deploy/" 2>/dev/null || true
+    echo -e "  ${YELLOW}ℹ${NC}  $DEPLOY: TODO stub created in .deploy/"
+    ;;
+
+  none)
+    echo -e "  ${GREEN}✅${NC} No deployment (library/CLI/local-only)"
+    ;;
+esac
     ;;
   custom|*)
     cat > "$PROJECT_DIR/package.json" <<EOF
