@@ -122,10 +122,58 @@ get_current_phase() {
   fi
 }
 
+# === Check if a phase is already shipped per STATE.md ===
+is_phase_complete() {
+  local phase_num="$1"
+  local state_file="$PROJECT_DIR/.planning/STATE.md"
+
+  [[ ! -f "$state_file" ]] && return 1
+
+  # Look for explicit completion markers:
+  # "Phase N: complete" or "Phase N — complete" or "[x] Phase N" or "Status: complete" near "Phase N"
+  if grep -qiE "(^|[^a-z])phase[ -]+$phase_num[: -]+(complete|delivered|shipped|done)" "$state_file"; then
+    return 0
+  fi
+
+  # Check ROADMAP for [x] checkboxes on Phase N tasks (all done)
+  local roadmap="$PROJECT_DIR/.planning/ROADMAP.md"
+  if [[ -f "$roadmap" ]]; then
+    # Extract Phase N block, count [ ] vs [x]
+    local phase_block
+    phase_block=$(awk "/^## Phase $phase_num /,/^## Phase [0-9]+/" "$roadmap" | head -n -1)
+    local pending=$(echo "$phase_block" | grep -cE "^- \[ \]" || echo 0)
+    local done_count=$(echo "$phase_block" | grep -cE "^- \[x\]" || echo 0)
+    # All tasks checked AND at least 1 task = phase complete
+    if [[ $pending -eq 0 ]] && [[ $done_count -gt 0 ]]; then
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+# === Detect AI quota errors in team artifacts (don't mistake for verdicts) ===
+artifact_has_real_content() {
+  local artifact="$1"
+  [[ ! -f "$artifact" ]] && return 1
+  # Reject if file is just a quota/error blob
+  if grep -qiE "QUOTA_EXHAUSTED|TerminalQuotaError|hit your usage limit|Plan.*limit|capacity.*reset" "$artifact" 2>/dev/null; then
+    return 1
+  fi
+  # Must have actual content (not just whitespace)
+  [[ $(wc -l < "$artifact" 2>/dev/null | tr -d ' ') -gt 3 ]]
+}
+
 # === Run a single phase ===
 run_phase() {
   local phase_num="$1"
   log INFO "━━━ Running Phase $phase_num ━━━"
+
+  # NEW: Skip if already complete (per STATE.md or ROADMAP checkboxes)
+  if is_phase_complete "$phase_num"; then
+    log OK "Phase $phase_num already complete (per STATE.md/ROADMAP) — skipping"
+    return 0
+  fi
 
   # Check for GSD planning dir
   local phase_dir="$PROJECT_DIR/.planning/phase-$phase_num"
@@ -136,6 +184,18 @@ run_phase() {
     plan_phase "$phase_num"
   else
     log OK "Phase $phase_num already planned"
+  fi
+
+  # NEW: Validate plan has actual tasks before dispatching
+  if [[ -f "$phase_dir/PLAN.md" ]]; then
+    local task_count
+    task_count=$(grep -cE "^[[:space:]]*-[[:space:]]+\[[[:space:]]\]" "$phase_dir/PLAN.md" 2>/dev/null || echo 0)
+    if [[ $task_count -eq 0 ]]; then
+      log WARN "Phase $phase_num has no actionable tasks in PLAN.md — marking complete and moving on"
+      update_state "$phase_num" "complete (no tasks)"
+      return 0
+    fi
+    log INFO "Phase $phase_num plan: $task_count tasks to execute"
   fi
 
   # Step 2: Execute plan
