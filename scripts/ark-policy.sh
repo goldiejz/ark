@@ -36,6 +36,13 @@ else
   policy_config_dump() { echo "policy-config.sh not available"; }
 fi
 
+# === Source SQLite backend lib (Phase 2.5; graceful degradation if missing) ===
+# shellcheck disable=SC1091
+if [[ -f "$_POLICY_LIB_DIR/policy-db.sh" ]]; then
+  source "$_POLICY_LIB_DIR/policy-db.sh"
+  db_init >/dev/null 2>&1
+fi
+
 # === Load thresholds via cascading config (env > project > vault > defaults) ===
 # Honors legacy env vars (ARK_MONTHLY_ESCALATE_PCT, ARK_SELF_HEAL_MAX) via the lib.
 policy_load_config() {
@@ -76,16 +83,17 @@ _policy_log() {
   fi
   decision_id="${ts_compact}-${rand}"
 
-  # correlation_id: bare null literal vs quoted string
-  local corr_field
-  if [[ "$correlation_id" == "null" ]]; then
-    corr_field="null"
+  # Phase 2.5: write to SQLite via policy-db lib. The lib normalizes 'null' -> NULL
+  # and SQL-escapes context. Schema/keys identical to Phase 2 contract.
+  if type db_insert_decision >/dev/null 2>&1; then
+    db_insert_decision "$ts" "$decision_id" "$class" "$decision" "$reason" "$context" "$correlation_id" >/dev/null
   else
-    corr_field="\"$correlation_id\""
+    # Graceful degradation: write JSONL if SQLite lib unavailable
+    local corr_field
+    if [[ "$correlation_id" == "null" ]]; then corr_field="null"; else corr_field="\"$correlation_id\""; fi
+    printf '{"ts":"%s","schema_version":1,"decision_id":"%s","class":"%s","decision":"%s","reason":"%s","context":%s,"outcome":null,"correlation_id":%s}\n' \
+      "$ts" "$decision_id" "$class" "$decision" "$reason" "$context" "$corr_field" >> "$POLICY_LOG"
   fi
-
-  printf '{"ts":"%s","schema_version":1,"decision_id":"%s","class":"%s","decision":"%s","reason":"%s","context":%s,"outcome":null,"correlation_id":%s}\n' \
-    "$ts" "$decision_id" "$class" "$decision" "$reason" "$context" "$corr_field" >> "$POLICY_LOG"
 
   echo "$decision_id"
 }
@@ -257,13 +265,17 @@ policy_dispatch_failure() {
 }
 
 # === Audit helper (public): show recent decisions ===
+# Phase 2.5: reads from SQLite (policy-db lib) instead of tailing JSONL.
 policy_audit() {
   local n="${1:-20}"
-  if [[ ! -f "$POLICY_LOG" ]]; then
+  if type db_tail_decisions >/dev/null 2>&1; then
+    db_tail_decisions "$n"
+  elif [[ -f "$POLICY_LOG" ]]; then
+    # Graceful degradation: read legacy JSONL if SQLite lib unavailable
+    tail -n "$n" "$POLICY_LOG"
+  else
     echo "No policy decisions logged yet."
-    return
   fi
-  tail -n "$n" "$POLICY_LOG"
 }
 
 # === Self-test (only runs when sourced with $1=test) ===
@@ -271,7 +283,14 @@ if [[ "${1:-}" == "test" ]]; then
   echo "🧪 ark-policy.sh self-test"
   echo ""
 
-  # Isolated log so test doesn't pollute prod
+  # Isolated DB so test doesn't pollute prod (Phase 2.5: SQLite backend)
+  TEST_DB="/tmp/ark-policy-test-$$.db"
+  ARK_POLICY_DB="$TEST_DB"
+  rm -f "$TEST_DB" "$TEST_DB-shm" "$TEST_DB-wal"
+  if type db_init >/dev/null 2>&1; then
+    db_init >/dev/null
+  fi
+  # Legacy JSONL fallback (only used if SQLite lib missing)
   TEST_LOG="/tmp/ark-policy-test-$$.jsonl"
   POLICY_LOG="$TEST_LOG"
   : > "$TEST_LOG"
@@ -330,29 +349,34 @@ if [[ "${1:-}" == "test" ]]; then
   assert_eq "80" "$override_val" "ARK_MONTHLY_ESCALATE_PCT=80 override honored"
 
   echo ""
-  echo "Audit log schema (W-6 + NEW-W-4):"
-  last_line=$(tail -1 "$TEST_LOG")
-  assert_match '"schema_version":1' "$last_line" "schema_version=1 present"
-  assert_match '"decision_id":"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}"' "$last_line" "decision_id matches ts-16hex format"
-  assert_match '"outcome":null' "$last_line" "outcome:null present"
-  assert_match '"correlation_id":null' "$last_line" "correlation_id:null present"
-
-  # Validate every line is parseable JSON
-  json_ok=$(python3 -c "
-import json, sys
-with open('$TEST_LOG') as f:
-    for i, l in enumerate(f, 1):
-        json.loads(l)
-print('OK')
-" 2>&1)
-  assert_eq "OK" "$json_ok" "every audit line is valid JSON"
+  echo "Audit log schema (Phase 2.5 SQLite — W-6 + NEW-W-4 fields):"
+  if type db_path >/dev/null 2>&1; then
+    # SQL queries against the test DB
+    last_id=$(sqlite3 "$(db_path)" "SELECT decision_id FROM decisions ORDER BY ts DESC LIMIT 1;" 2>/dev/null)
+    schema_ver=$(sqlite3 "$(db_path)" "SELECT schema_version FROM decisions LIMIT 1;" 2>/dev/null)
+    null_outcome=$(sqlite3 "$(db_path)" "SELECT count(*) FROM decisions WHERE outcome IS NULL;" 2>/dev/null)
+    null_corr=$(sqlite3 "$(db_path)" "SELECT count(*) FROM decisions WHERE correlation_id IS NULL;" 2>/dev/null)
+    total_rows=$(sqlite3 "$(db_path)" "SELECT count(*) FROM decisions;" 2>/dev/null)
+    assert_eq "1" "$schema_ver" "schema_version=1 stored"
+    assert_match '^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}$' "$last_id" "decision_id matches ts-16hex format"
+    assert_eq "$total_rows" "$null_outcome" "outcome:null on every row"
+    assert_eq "$total_rows" "$null_corr" "correlation_id:null on every row (no chains in test)"
+  else
+    # JSONL fallback path
+    last_line=$(tail -1 "$TEST_LOG")
+    assert_match '"schema_version":1' "$last_line" "schema_version=1 present (JSONL fallback)"
+    assert_match '"decision_id":"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}"' "$last_line" "decision_id format (JSONL fallback)"
+  fi
 
   echo ""
   echo "Decision-ID stress (NEW-W-4 — 100 calls → 100 distinct IDs):"
-  # Capture 100 IDs (each _policy_log call echoes its decision_id)
-  STRESS_LOG="/tmp/ark-policy-stress-$$.jsonl"
-  POLICY_LOG="$STRESS_LOG"
-  : > "$STRESS_LOG"
+  # Phase 2.5: stress against an isolated SQLite DB
+  STRESS_DB="/tmp/ark-policy-stress-$$.db"
+  ARK_POLICY_DB="$STRESS_DB"
+  rm -f "$STRESS_DB" "$STRESS_DB-shm" "$STRESS_DB-wal"
+  if type db_init >/dev/null 2>&1; then
+    db_init >/dev/null
+  fi
   ids=()
   i=0
   while [[ $i -lt 100 ]]; do
@@ -362,20 +386,24 @@ print('OK')
   done
   unique_count=$(printf '%s\n' "${ids[@]}" | sort -u | wc -l | tr -d ' ')
   assert_eq "100" "$unique_count" "100 _policy_log calls produced 100 distinct decision_ids"
-  rm -f "$STRESS_LOG"
-  POLICY_LOG="$TEST_LOG"
+  rm -f "$STRESS_DB" "$STRESS_DB-shm" "$STRESS_DB-wal"
+  ARK_POLICY_DB="$TEST_DB"
 
   echo ""
-  echo "Audit log entries: $(wc -l < "$TEST_LOG" | tr -d ' ')"
+  if type db_path >/dev/null 2>&1; then
+    echo "Audit log entries (SQLite): $(sqlite3 "$TEST_DB" 'SELECT count(*) FROM decisions;' 2>/dev/null)"
+  else
+    echo "Audit log entries (JSONL fallback): $(wc -l < "$TEST_LOG" | tr -d ' ')"
+  fi
 
   echo ""
   if [[ "$fail" -eq 0 ]]; then
     echo "✅ ALL POLICY TESTS PASSED ($pass/$pass)"
-    rm -f "$TEST_LOG"
+    rm -f "$TEST_LOG" "$TEST_DB" "$TEST_DB-shm" "$TEST_DB-wal"
     exit 0
   else
     echo "❌ $fail/$((pass+fail)) tests failed"
-    echo "Test log preserved at: $TEST_LOG"
+    echo "Test artefacts preserved at: $TEST_LOG, $TEST_DB"
     exit 1
   fi
 fi

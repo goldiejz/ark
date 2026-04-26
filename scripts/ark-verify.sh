@@ -337,8 +337,8 @@ run_check 8 "self-heal.sh has --retry mode + 3 layer entries" \
   "^[4-9]$|^[1-9][0-9]+$"
 
 run_check 8 "Audit log schema_version=1 + decision_id (16-hex suffix)" \
-  "bash -c 'TLOG=/tmp/tier8-schema-\$\$.jsonl; POLICY_LOG=\$TLOG ARK_HOME=$VAULT_PATH bash -c \"export POLICY_LOG=\$TLOG; source $VAULT_PATH/scripts/ark-policy.sh; POLICY_LOG=\$TLOG; policy_budget_decision 0 50000 0 1000000 >/dev/null\"; tail -1 \$TLOG; rm -f \$TLOG'" \
-  "schema_version\":1.*decision_id\":\"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}\""
+  "bash -c 'TDB=/tmp/tier8-schema-\$\$.db; ARK_POLICY_DB=\$TDB ARK_HOME=$VAULT_PATH bash -c \"export ARK_POLICY_DB=\$TDB; source $VAULT_PATH/scripts/ark-policy.sh; policy_budget_decision 0 50000 0 1000000 >/dev/null\"; sqlite3 \$TDB \"SELECT printf(\\\"schema_version=%d decision_id=%s\\\", schema_version, decision_id) FROM decisions LIMIT 1;\"; rm -f \$TDB \$TDB-shm \$TDB-wal'" \
+  "schema_version=1 decision_id=[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}"
 
 # NEW-B-2 verification: class:self_heal lines in the global log must contain decision_id.
 # Mirrors the existing class:budget assertion from 02-06b.
