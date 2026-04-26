@@ -1,158 +1,240 @@
 ---
 name: brain
-description: Activate the automation brain for the current project. Use when user invokes /brain, asks to start/init/bootstrap a project with the brain, wants to see lessons or insights, or needs to scaffold a project from brain templates.
+description: Autonomous project delivery system. Activate when user invokes /brain, asks to scaffold/build/deliver a project, integrates GSD/Superpowers workflows, or wants brain-managed project lifecycle (design→build→deploy→learn). The brain orchestrates GSD phases + Superpowers practices into one autonomous pipeline.
 ---
 
-# Brain Skill — Automation Brain Activation
+# Brain Skill — Autonomous Project Delivery
 
-Single entry point for the automation brain system. Handles init, bootstrap, scaffolding, and viewing insights — all from inside Claude Code.
+The brain is the orchestration layer that converts a design (from `/superpowers:brainstorming` or `/gsd-new-project`) into a fully delivered project — scaffolded, built, tested, deployed, and continuously learning.
 
 ## When to use
 
-- User says `/brain`, `/brain init`, `/brain bootstrap`, `/brain scaffold`, `/brain insights`, `/brain status`
-- User asks "start this project with brain", "bootstrap this", "init brain here"
-- User wants to import a project and have it inherit the Strategix automation brain
-- User asks to see lessons, patterns, or cross-project insights
+- User says `/brain`, `/brain create`, `/brain deliver`, `/brain init`, etc.
+- User wants to scaffold a new project ("create a service desk for acme")
+- User wants to build phases autonomously ("run phase 1", "deliver this project")
+- User just finished a brainstorm/spec and wants to start building
+- User asks about lessons, insights, or cross-project patterns
+- Any project lifecycle action: design → build → deploy
 
 ## Vault location
 
-The automation brain vault is at: `~/vaults/automation-brain/`
-GitHub: https://github.com/goldiejz/automation-brain
+- Vault: `~/vaults/automation-brain/`
+- GitHub: https://github.com/goldiejz/automation-brain
+- All vault writes auto-commit + push
+
+## The Autonomous Pipeline
+
+```
+DESIGN PHASE
+  /superpowers:brainstorming  → captures vision in chat
+  OR /gsd-new-project          → generates ROADMAP.md with phases
+  ↓
+SCAFFOLD PHASE
+  /brain create <name> --type <type> --customer <customer>
+  → Writes CLAUDE.md, .planning/, src/lib/rbac.ts, package.json
+  → git init + GitHub repo + brain integration
+  ↓
+DELIVERY PHASE (per ROADMAP phase)
+  /brain deliver
+  → For each phase:
+    1. /gsd-plan-phase (or AI dispatch)
+    2. /gsd-execute-phase (or Codex direct)
+    3. /superpowers:test-driven-development (write tests first)
+    4. brain verify (npm test + tsc)
+    5. brain self-heal (if failure)
+    6. brain deploy (wrangler/npm)
+    7. /superpowers:verification-before-completion
+    8. brain commit + push (atomic per phase)
+    9. STATE.md updated
+  ↓
+LEARN PHASE (continuous)
+  Stop hook auto-fires:
+    → brain-extract-learnings (regex/AI)
+    → Phase 6 daemon detects patterns
+    → Vault updated, lessons available to next project
+```
 
 ## Sub-commands
 
-When user invokes `/brain <subcommand>`, follow the matching playbook below.
-
 ### `/brain` (default) or `/brain status`
 
-1. Check current working directory has `.parent-automation/`
-2. If yes, run: `bash ~/vaults/automation-brain/scripts/brain status`
-3. If no, suggest `/brain init` and explain what it does
-4. Show:
-   - Snapshot version + lesson count
-   - Decision log entry count
-   - Vault commit hash
+1. Run: `bash ~/vaults/automation-brain/scripts/brain status` via Bash tool
+2. Show snapshot version, lesson count, decision count
+3. If no `.parent-automation/`, suggest `/brain init`
+
+### `/brain create`
+
+**This is the autonomous scaffold command.**
+
+Required: project name + type + customer
+
+If user hasn't specified, ask:
+- Project name?
+- Type? (`service-desk` | `revops` | `ops-intelligence` | `custom`)
+- Customer name?
+
+Then run via Bash:
+```bash
+bash ~/vaults/automation-brain/scripts/brain create <name> \
+  --type <type> --customer <customer>
+```
+
+This writes ALL files (CLAUDE.md, .planning/*, src/lib/rbac.ts, package.json, wrangler.toml, etc.), creates GitHub repo, and integrates brain.
+
+After: tell user `cd <path>` and run `/brain deliver` to start autonomous build.
+
+### `/brain deliver`
+
+**This is the autonomous build command.**
+
+Run via Bash:
+```bash
+bash ~/vaults/automation-brain/scripts/brain deliver
+```
+
+The script reads ROADMAP.md and runs each phase autonomously. If ROADMAP isn't detailed enough, suggest user run `/gsd-plan-phase 1` first to populate Phase 1.
+
+For each phase, the brain:
+1. **Plans** — dispatches Codex or invokes `/gsd-plan-phase`
+2. **Executes** — dispatches code generation
+3. **Verifies** — runs tests, type checks
+4. **Self-heals** — auto-fixes failures via Codex/Gemini
+5. **Deploys** — wrangler or npm run deploy
+6. **Commits** — atomic per phase, pushed to GitHub
+
+Variants:
+- `/brain deliver --phase N` — single phase only
+- `/brain deliver --resume` — continue from last completed
+- `/brain deliver --from-spec FILE` — start from brainstorm output
 
 ### `/brain init`
 
-For initializing a project (new or imported) with brain integration.
+For projects that aren't scaffolded yet (existing imported codebase):
+```bash
+bash ~/vaults/automation-brain/scripts/brain init
+```
 
-1. Run: `bash ~/vaults/automation-brain/scripts/brain init`
-2. Verify it created:
-   - `.parent-automation/query-brain.ts`
-   - `.parent-automation/new-project-bootstrap-v2.ts`
-   - `.parent-automation/brain-snapshot/`
-   - `.planning/bootstrap-decisions.jsonl`
-3. Report success and offer next step: `/brain bootstrap` or `/brain scaffold`
+Sets up `.parent-automation/`, copies query-brain.ts + bootstrap-v2.ts, syncs snapshot.
+
+### `/brain align`
+
+For imported projects with non-canonical structure:
+```bash
+bash ~/vaults/automation-brain/scripts/brain align
+```
+
+Standardizes: renames LEARNINGS.md → tasks/lessons.md, scans all .md files (including symlinks), generates doc-inventory.md, migrates project lessons to vault.
+
+### `/brain doctor`
+
+Comprehensive health check:
+```bash
+bash ~/vaults/automation-brain/scripts/brain doctor
+```
+
+27 checks: vault, scripts, hooks, registration, AI tools, Phase 6, project integration. Returns exit code for CI use.
 
 ### `/brain bootstrap`
 
-Runs the 12-step brain-aware bootstrap (records decisions, doesn't scaffold files).
+Manual decision logging (records that you started a project, doesn't write files):
+```bash
+bash ~/vaults/automation-brain/scripts/brain bootstrap
+```
 
-1. Run: `bash ~/vaults/automation-brain/scripts/brain bootstrap`
-2. Show the cached templates that were applied
-3. Show token savings (target: 7-15K vs 25K)
-4. Confirm decision logged + Phase 6 triggered
-5. Offer next step: `/brain scaffold` to actually create files
-
-### `/brain scaffold`
-
-**This is the action command** — actually writes files based on brain templates.
-
-If the user hasn't given parameters, ask:
-- Project type? (service-desk | revops | ops-intelligence | custom)
-- Customer name?
-- Project name?
-
-Then:
-1. Read the relevant cached templates from `.parent-automation/brain-snapshot/cache/query-responses/`:
-   - `01-project-section-draft.md` → for `CLAUDE.md` Project section
-   - `02-scope-definition.md` → for `CLAUDE.md` Scope section
-   - `03-architecture-conventions.md` → for `CLAUDE.md` Architecture section
-   - `04-rbac-structure.md` → for `src/lib/rbac.ts`
-   - `05-constraints.md` → for `CLAUDE.md` Constraints section
-   - `07-vault-structure.md` → for vault scaffold
-   - `08-test-coverage.md` → for test setup
-   - `09-anti-patterns.md` → for `CLAUDE.md` Anti-patterns
-
-2. Read the project-type template from `.parent-automation/brain-snapshot/templates/[project-type]-template.md`
-
-3. Apply lessons from `.parent-automation/brain-snapshot/lessons/` (especially L-018, L-020, L-021)
-
-4. Generate these files in the project root:
-   - `CLAUDE.md` — repo instruction (13-section template per project-standard.md)
-   - `.planning/STATE.md` — primary truth file (initialize as Phase 0 bootstrap)
-   - `.planning/PROJECT.md` — durable purpose
-   - `.planning/ALPHA.md` — gate criteria
-   - `.planning/ROADMAP.md` — phase sequencing
-   - `.planning/REQUIREMENTS.md` — empty checklist
-   - `tasks/todo.md` — initialized
-   - `tasks/lessons.md` — initialized
-   - `package.json` — with stack from project-type
-   - `tsconfig.json`
-   - `src/lib/rbac.ts` — centralized roles
-   - `wrangler.toml` (if Cloudflare project)
-   - Initial Drizzle schema in `src/db/schema.ts`
-
-5. Run `npm install` if user agrees
-
-6. Show summary: "Created X files, Y lines, Z dependencies. Next: `npm run dev`"
-
-7. Run `brain bootstrap` again to log this scaffold decision
+Use this if you want to record a decision without scaffolding. Most users want `/brain create` instead.
 
 ### `/brain insights`
 
-Show cross-project patterns from Phase 6 observability.
-
-1. Read: `~/vaults/automation-brain/observability/cross-customer-insights.md`
-2. Read: `~/vaults/automation-brain/observability/lesson-effectiveness.md`
-3. Show top 5 patterns + top 5 lessons by effectiveness
+Show cross-project patterns from Phase 6:
+```bash
+bash ~/vaults/automation-brain/scripts/brain insights
+```
 
 ### `/brain lessons`
 
-List all 55+ lessons in the vault.
-
-1. Run: `bash ~/vaults/automation-brain/scripts/brain lessons`
-2. If user asks about a specific lesson, read the file from `~/vaults/automation-brain/lessons/`
-
-### `/brain sync`
-
-Lightweight: just pull latest vault + refresh local snapshot.
-
-1. Run: `bash ~/vaults/automation-brain/scripts/brain sync`
-2. Show what was updated (vault commit before/after)
+List all lessons in the brain:
+```bash
+bash ~/vaults/automation-brain/scripts/brain lessons
+```
 
 ### `/brain phase-6`
 
-Manually trigger Phase 6 observability daemon.
+Manually trigger Phase 6 daemon:
+```bash
+bash ~/vaults/automation-brain/scripts/brain phase-6
+```
 
-1. Run: `bash ~/vaults/automation-brain/scripts/brain phase-6`
-2. Show output (patterns detected, lesson effectiveness updated)
+### `/brain sync`
 
-### `/brain dev` or `/brain start`
+Pull latest vault from GitHub:
+```bash
+bash ~/vaults/automation-brain/scripts/brain sync
+```
 
-Start the dev server for the current project.
+## Integration with other skills
 
-1. Detect project stack from `package.json`:
-   - `"dev": "wrangler dev"` → Cloudflare Workers
-   - `"dev": "vite"` → Vite SPA
-   - `"dev": "next dev"` → Next.js
-2. Run `npm install` if `node_modules` doesn't exist
-3. Run `npm run dev`
-4. Show URL where dev server is running
+### After `/superpowers:brainstorming`
+The brainstorm produces a spec in chat. Invoke:
+```
+/brain create <name> --type custom --customer <user>
+# Then edit .planning/PROJECT.md with the spec
+/brain deliver
+```
 
-## Important
+### After `/gsd-new-project`
+GSD generates ROADMAP.md with phases. Invoke:
+```
+/brain create <name> --type <detected-type> --customer <user>
+# .planning/ already populated by GSD
+/brain deliver
+```
 
-- **Always run shell commands via `Bash` tool** — don't try to invoke `brain` as a slash command
-- **Verify .parent-automation/ exists** before running bootstrap-dependent commands
-- **For scaffold**: actually write files using `Write` tool — don't just describe what would happen
-- **Preserve existing files** — if scaffolding would overwrite, ask first
-- **After scaffolding, commit to git** with message like "Initial scaffold from brain templates (vault: <commit>)"
+### Combined with `/gsd-autonomous`
+GSD has its own autonomous mode. Brain deliver complements by:
+- Running brain-sync before each phase (gets latest patterns)
+- Running self-heal after each phase failure
+- Auto-deploying after each successful phase
+- Recording decisions for cross-project learning
+
+User can choose:
+- `/gsd-autonomous` for pure GSD workflow
+- `/brain deliver` for brain-orchestrated (calls GSD as needed)
+
+### Combined with Superpowers
+Brain deliver always uses these Superpowers patterns:
+- `/superpowers:test-driven-development` — tests first, always
+- `/superpowers:verification-before-completion` — at verify step
+- `/superpowers:requesting-code-review` — after each phase commits
+- `/superpowers:systematic-debugging` — when self-heal escalates
+
+## Important rules
+
+1. **Always invoke via Bash tool** — never try to run `brain` as a slash command
+2. **Verify .parent-automation/ exists** before deliver/bootstrap commands
+3. **Confirm with user before destructive ops** — `brain create` overwrites, `brain align` moves files
+4. **Preserve existing customizations** — brain init/align always backs up first
+5. **After scaffolding** — actually edit the stub files with real content using `Write` and `Edit` tools
+6. **For deliver failures** — read self-healing/proposed/ and apply fixes manually if auto-apply didn't work
+7. **Auto-commits are normal** — vault commits to GitHub continuously without user prompt
 
 ## Resources
 
 - Vault: `~/vaults/automation-brain/`
-- GitHub: https://github.com/goldiejz/automation-brain
-- Per-project snapshot: `.parent-automation/brain-snapshot/`
-- Decision log: `.planning/bootstrap-decisions.jsonl`
+- Scripts: `~/vaults/automation-brain/scripts/brain*.sh`
+- Hooks: `~/.claude/hooks/brain-*.sh`
+- Templates: `~/vaults/automation-brain/templates/`
+- Lessons: `~/vaults/automation-brain/lessons/`
 - Phase 6 outputs: `~/vaults/automation-brain/observability/`
+- Self-heal proposals: `~/vaults/automation-brain/self-healing/proposed/`
+
+## Flow Summary
+
+User says: "build me an acme service desk"
+
+You:
+1. Confirm: type=service-desk, customer=acme
+2. Run: `! brain create acme-service-desk --type service-desk --customer acme`
+3. Help user define real scope: Use `Edit` tool to update `.planning/PROJECT.md` and `.planning/ROADMAP.md`
+4. Run: `! brain deliver` (kicks off autonomous build)
+5. Monitor progress, intervene if self-heal escalates
+6. Final: GitHub repo with working deployed app
