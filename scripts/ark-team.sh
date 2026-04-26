@@ -20,7 +20,10 @@ PROJECT_DIR="${1:?project dir required}"
 PHASE_NUM="${2:?phase number required}"
 
 VAULT_PATH="${ARK_HOME:-$HOME/vaults/ark}"
-PHASE_DIR="$PROJECT_DIR/.planning/phase-$PHASE_NUM"
+
+# Resolve phase dir respecting GSD layout (phases/NN-slug/) or legacy (phase-N/)
+source "$VAULT_PATH/scripts/lib/gsd-shape.sh"
+PHASE_DIR=$(gsd_resolve_phase_dir "$PHASE_NUM" "$PROJECT_DIR")
 TEAM_DIR="$PHASE_DIR/team"
 mkdir -p "$TEAM_DIR"
 
@@ -78,11 +81,20 @@ build_context() {
       cat "$PROJECT_DIR/.planning/PROJECT.md"
       echo ""
     }
-    [[ -f "$PHASE_DIR/PLAN.md" ]] && {
-      echo "## Phase Plan"
-      cat "$PHASE_DIR/PLAN.md"
-      echo ""
-    }
+    # Multi-plan support: concat ALL *-PLAN.md (GSD) or single PLAN.md (Ark)
+    local _plans
+    _plans=$(gsd_find_plan_files "$PHASE_DIR")
+    if [[ -n "$_plans" ]]; then
+      echo "## Phase Plan(s)"
+      while IFS= read -r _pf; do
+        [[ -z "$_pf" ]] && continue
+        echo ""
+        echo "### $(basename "$_pf")"
+        echo ""
+        cat "$_pf"
+        echo ""
+      done <<< "$_plans"
+    fi
     [[ -f "$PROJECT_DIR/CLAUDE.md" ]] && {
       echo "## Repo Conventions (CLAUDE.md)"
       head -120 "$PROJECT_DIR/CLAUDE.md"
@@ -411,7 +423,13 @@ EOF
 # ════════════════════════════════════════════════════════
 role_ceo_report() {
   local pm_status="$1"
-  local report="$PROJECT_DIR/.planning/phase-$PHASE_NUM-ceo-report.md"
+  # GSD layout: report lives inside phase dir as CEO-REPORT.md; legacy: .planning/phase-N-ceo-report.md
+  local report
+  if gsd_is_gsd_project "$PROJECT_DIR"; then
+    report="$PHASE_DIR/CEO-REPORT.md"
+  else
+    report="$PROJECT_DIR/.planning/phase-$PHASE_NUM-ceo-report.md"
+  fi
 
   cat > "$report" <<EOF
 # CEO Report — Phase $PHASE_NUM
