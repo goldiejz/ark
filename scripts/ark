@@ -89,12 +89,15 @@ cmd_lessons() {
   print_header
   echo -e "${BLUE}📚 Available Lessons:${NC}"
   echo ""
-  find "$VAULT_PATH/lessons" -name "*.md" -type f 2>/dev/null | while read -r f; do
+  # Disable pipefail temporarily — head -30 closing pipe is intentional
+  set +o pipefail
+  find "$VAULT_PATH/lessons" -name "*.md" -type f 2>/dev/null | head -30 | while read -r f; do
     title=$(grep -m1 "^# " "$f" 2>/dev/null | sed 's/^# //' || basename "$f")
     echo "  • $title"
-  done | head -30
+  done
+  set -o pipefail
   echo ""
-  TOTAL=$(find "$VAULT_PATH/lessons" -name "*.md" -type f | wc -l | tr -d ' ')
+  TOTAL=$(find "$VAULT_PATH/lessons" -name "*.md" -type f 2>/dev/null | wc -l | tr -d ' ')
   echo "  Total: $TOTAL lessons"
 }
 
