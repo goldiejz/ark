@@ -65,17 +65,19 @@ The following phases are the full AOS journey. Each phase removes one class of "
 
 **Exit criteria:** `ark create "service desk for managed-print provider" --customer acme` produces a working scaffolded project with zero prompts. **Met** — Tier 10 22/22, Tier 7/8/9 retained at 14/25/20.
 
-### Phase 5 — AOS: Portfolio Autonomy
+### Phase 5 — AOS: Portfolio Autonomy (complete)
 **Goal:** Given "ship something" with no project named, Ark picks the highest-leverage project from the portfolio and runs it.
 
-- [ ] `scripts/ark-portfolio-decide.sh` — priority engine
-- [ ] Inputs: CEO directives in `~/vaults/StrategixMSPDocs/programme.md`, portfolio health (test pass rate, last-touched date, blocker count), monthly budget headroom per customer
-- [ ] Outputs: next-project decision logged to `policy-decisions.jsonl`
-- [ ] Per-customer monthly budget caps in `policy.yml`
-- [ ] Cross-project budget routing: don't burn 100% of monthly cap on one customer
-- [ ] Tier 11 verify: simulated portfolio with 3 projects of varying health → assert priority engine picks the right one
+- [x] `scripts/ark-portfolio-decide.sh` — priority engine
+- [x] Inputs: CEO directives in `~/vaults/StrategixMSPDocs/programme.md`, portfolio health (test pass rate, last-touched date, blocker count), monthly budget headroom per customer
+- [x] Outputs: next-project decision logged to `policy-decisions.jsonl`
+- [x] Per-customer monthly budget caps in `policy.yml`
+- [x] Cross-project budget routing: don't burn 100% of monthly cap on one customer
+- [x] Tier 11 verify: simulated portfolio with 3 projects of varying health → assert priority engine picks the right one
 
-**Exit criteria:** `ark deliver` (no `--phase`, no project) picks the highest-priority project, runs its next phase, logs the decision rationale.
+**Exit criteria:** `ark deliver` (no `--phase`, no project) picks the highest-priority project, runs its next phase, logs the decision rationale. **Met** — Tier 11 16/16, Tier 7/8/9/10 retained at 14/25/20/22.
+
+**Status:** ✅ Complete — see .planning/phases/05-portfolio-autonomy/
 
 ### Phase 6 — AOS: Cross-Customer Learning Autonomy
 **Goal:** Lessons learned in one customer auto-promote to universal when the same pattern recurs in 2+ customers.
