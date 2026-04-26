@@ -373,10 +373,151 @@ continuous_tick() {
 
   # 6. SECTION sentinel: health-monitor (Plan 07-03 fills in)
   # === SECTION: health-monitor (Plan 07-03) ===
-  # Body added by Plan 07-03. Implements continuous_health_monitor —
-  # stuck-phase detection (no STATE.md modification >24h + no recent commits)
-  # and 3-tick consecutive-stuck escalation (idempotent dedupe via
-  # correlation_id on the STUCK_PHASE_DETECTED audit row).
+  # Body added by Plan 07-03. Implements:
+  #   continuous_health_monitor      — stuck-phase detection per project under
+  #     $ARK_PORTFOLIO_ROOT (STATE.md mtime > 24h AND no commits in last 24h).
+  #     correlation_id="<slug>:<phase>"; logs STUCK_PHASE_DETECTED. When 3+
+  #     consecutive detections seen for same correlation_id within 60min AND
+  #     no STUCK_ESCALATED in last 24h, append ESCALATIONS via ark_escalate
+  #     (architectural-ambiguity class) and log STUCK_ESCALATED.
+  #   continuous_auto_pause_check    — inspects last 3 TICK_COMPLETE rows; if
+  #     all show f:N>0, touch PAUSE + log AUTO_PAUSED + escalate. Idempotent
+  #     (no-op if PAUSE already exists).
+  # Both functions are defined here so they live entirely within the sentinel
+  # region (Plan 07-03's editable surface). Re-defining each tick is cheap.
+
+  continuous_health_monitor() {
+    local root="${ARK_PORTFOLIO_ROOT:-$HOME/code}"
+    [[ ! -d "$root" ]] && return 0
+
+    local dbp=""
+    if type db_path >/dev/null 2>&1; then
+      dbp="$(db_path 2>/dev/null)"
+    fi
+
+    local now state_md proj_dir slug phase state_mtime age stuck_mtime
+    local last_commit_epoch git_age stuck_git corr_id ctx
+    local count escalated_recently
+    now=$(date +%s)
+
+    # Walk to depth 3, find every project STATE.md (mirrors portfolio_scan_candidates).
+    while IFS= read -r state_md; do
+      [[ -z "$state_md" ]] && continue
+      [[ ! -f "$state_md" ]] && continue
+      proj_dir=$(dirname "$(dirname "$state_md")")
+      slug=$(basename "$proj_dir")
+
+      # Extract current phase value (quoted or bare).
+      phase=$(grep -m1 '^current_phase:' "$state_md" 2>/dev/null \
+        | sed -E 's/^current_phase:[[:space:]]*//; s/^"//; s/"$//' )
+      [[ -z "$phase" ]] && phase="unknown"
+
+      # mtime check (macOS stat -f %m; bash 3 compat)
+      state_mtime=$(stat -f %m "$state_md" 2>/dev/null)
+      [[ -z "$state_mtime" ]] && continue
+      age=$(( now - state_mtime ))
+      if [[ "$age" -gt 86400 ]]; then
+        stuck_mtime=1
+      else
+        stuck_mtime=0
+      fi
+
+      # git commit recency (last 24h on whatever HEAD is)
+      last_commit_epoch=$(cd "$proj_dir" 2>/dev/null && git log -1 --format=%ct 2>/dev/null)
+      if [[ -z "$last_commit_epoch" ]]; then
+        stuck_git=1
+      else
+        git_age=$(( now - last_commit_epoch ))
+        if [[ "$git_age" -gt 86400 ]]; then
+          stuck_git=1
+        else
+          stuck_git=0
+        fi
+      fi
+
+      if [[ "$stuck_mtime" -eq 1 ]] && [[ "$stuck_git" -eq 1 ]]; then
+        # NOTE: policy.db schema has correlation_id REFERENCES decisions(decision_id)
+        # (self-FK chain pointer), so we cannot stuff slug:phase there. Instead the
+        # group key is encoded in the `reason` field and queried via LIKE.
+        corr_id="${slug}:${phase}"
+        # JSON-safe phase (escape backslashes + double quotes)
+        local phase_j slug_j
+        phase_j=$(printf '%s' "$phase" | sed 's/\\/\\\\/g; s/"/\\"/g')
+        slug_j=$(printf '%s' "$slug" | sed 's/\\/\\\\/g; s/"/\\"/g')
+        ctx="{\"slug\":\"${slug_j}\",\"phase\":\"${phase_j}\",\"age\":${age},\"corr\":\"${corr_id}\"}"
+        # reason format: "stuck:<slug>:<phase> age:NNN" — LIKE-friendly group key.
+        _policy_log "continuous" "STUCK_PHASE_DETECTED" \
+          "stuck:${corr_id} age:${age}" "$ctx" "null" >/dev/null 2>&1
+
+        if [[ -n "$dbp" ]] && [[ -f "$dbp" ]]; then
+          # Escape single quotes for SQL LIKE literal.
+          local corr_sql
+          corr_sql=$(printf '%s' "$corr_id" | sed "s/'/''/g")
+          count=$(sqlite3 "$dbp" \
+            "SELECT COUNT(*) FROM decisions WHERE class='continuous' AND decision='STUCK_PHASE_DETECTED' AND reason LIKE 'stuck:${corr_sql} %' AND ts >= datetime('now','-60 minutes');" \
+            2>/dev/null)
+          [[ -z "$count" ]] && count=0
+          escalated_recently=$(sqlite3 "$dbp" \
+            "SELECT COUNT(*) FROM decisions WHERE class='continuous' AND decision='STUCK_ESCALATED' AND reason LIKE 'stuck:${corr_sql} %' AND ts >= datetime('now','-24 hours');" \
+            2>/dev/null)
+          [[ -z "$escalated_recently" ]] && escalated_recently=0
+
+          if [[ "$count" -ge 3 ]] && [[ "$escalated_recently" -eq 0 ]]; then
+            ark_escalate "architectural-ambiguity" \
+              "ark-continuous: stuck phase $slug ($phase) — $count consecutive detections" \
+              "Project: $slug
+Phase: $phase
+STATE.md mtime age: ${age}s (> 24h)
+No git commits on HEAD in last 24h.
+Detected $count times within last 60 minutes.
+Inspect $proj_dir/.planning/STATE.md and recent activity. Resume the phase or close it manually." \
+              >/dev/null 2>&1 || true
+            _policy_log "continuous" "STUCK_ESCALATED" \
+              "stuck:${corr_id} consecutive:${count}" "$ctx" "null" >/dev/null 2>&1
+          fi
+        fi
+      fi
+    done < <(find "$root" -maxdepth 3 -type f -name STATE.md -path '*/.planning/STATE.md' 2>/dev/null)
+
+    return 0
+  }
+
+  continuous_auto_pause_check() {
+    # Idempotent: if PAUSE already exists, no-op.
+    [[ -f "$PAUSE_FILE" ]] && return 0
+
+    local dbp=""
+    if type db_path >/dev/null 2>&1; then
+      dbp="$(db_path 2>/dev/null)"
+    fi
+    [[ -z "$dbp" ]] || [[ ! -f "$dbp" ]] && return 0
+
+    # Count last-3 TICK_COMPLETE rows whose reason has f:N>0.
+    # Reason format from 07-02: "p:N f:M m:K". Match f:1, f:2, ..., f:9... (any non-zero).
+    # Sort by ts THEN decision_id (unique random suffix) since ts has 1-second
+    # resolution and rapid same-second ticks would otherwise tie-break arbitrarily.
+    local last_3_failed
+    last_3_failed=$(sqlite3 "$dbp" \
+      "SELECT COUNT(*) FROM (SELECT reason FROM decisions WHERE class='continuous' AND decision='TICK_COMPLETE' ORDER BY ts DESC, rowid DESC LIMIT 3) WHERE reason GLOB '*f:[1-9]*';" \
+      2>/dev/null)
+    [[ -z "$last_3_failed" ]] && last_3_failed=0
+
+    if [[ "$last_3_failed" -ge 3 ]]; then
+      : > "$PAUSE_FILE"
+      _policy_log "continuous" "AUTO_PAUSED" \
+        "consecutive_failure_ticks:3" \
+        "{\"trigger\":\"3_consecutive_failure_ticks\"}" \
+        >/dev/null 2>&1
+      ark_escalate "repeated-failure" \
+        "ark-continuous: 3 consecutive failure-ticks → auto-paused" \
+        "Last 3 TICK_COMPLETE audit rows all show non-zero failed count. PAUSE file created at $PAUSE_FILE. Inspect observability/continuous-operation.log + INBOX/*.failed before \`ark continuous resume\`." \
+        >/dev/null 2>&1 || true
+    fi
+    return 0
+  }
+
+  continuous_health_monitor || true
+  continuous_auto_pause_check || true
   # === END SECTION: health-monitor ===
 
   # 7. Audit TICK_COMPLETE
@@ -443,7 +584,12 @@ continuous_self_test() {
   # Set up isolated environment.
   export ARK_HOME="$TMP/vault"
   export ARK_POLICY_DB="$TMP/vault/observability/policy.db"
-  mkdir -p "$ARK_HOME/INBOX" "$ARK_HOME/observability"
+  # Phase 07-03: portfolio root must also be isolated BEFORE first tick, otherwise
+  # continuous_tick → continuous_health_monitor scans real ~/code and writes
+  # STUCK_PHASE_DETECTED rows for real projects into the test DB (test pollution,
+  # not real-vault leak — but it breaks STUCK_ESCALATED dedupe accounting).
+  export ARK_PORTFOLIO_ROOT="$TMP/portfolio_isolated_empty"
+  mkdir -p "$ARK_HOME/INBOX" "$ARK_HOME/observability" "$ARK_PORTFOLIO_ROOT"
   _continuous_refresh_paths
 
   # Initialise isolated DB so _policy_log goes there, not real DB.
@@ -768,6 +914,174 @@ EOF
     echo "  ⏭  Test 15: skipped (no real policy.db on this system)"
     pass=$((pass+1))
   fi
+
+  # ----------------------------------------------------------------------
+  # Test 16-21: Health-monitor (Plan 07-03)
+  # Synthetic portfolio under $TMP/portfolio with mktemp isolation.
+  # Real ~/code projects MUST NOT be flagged (ARK_PORTFOLIO_ROOT override).
+  # ----------------------------------------------------------------------
+  echo ""
+  echo "Test 16: Health-monitor — fresh project (not stuck)"
+  local TMP_PORT="$TMP/portfolio"
+  mkdir -p "$TMP_PORT"
+  export ARK_PORTFOLIO_ROOT="$TMP_PORT"
+
+  # Helper: create a synthetic project. $1=slug $2=mtime_age_seconds $3=git_age_or_none
+  _ct_make_proj() {
+    local s="$1" mtime_age="$2" git_mode="$3"
+    local p="$TMP_PORT/$s"
+    mkdir -p "$p/.planning"
+    cat > "$p/.planning/STATE.md" <<EOF
+---
+gsd_state_version: 1.0
+current_phase: "Phase 7 (synthetic-${s})"
+status: in-progress
+---
+# synthetic
+EOF
+    if [[ "$mtime_age" != "0" ]]; then
+      # touch -t YYYYMMDDHHMM (no seconds; close enough for >24h boundary)
+      local epoch=$(( $(date +%s) - mtime_age ))
+      local stamp
+      stamp=$(date -r "$epoch" +%Y%m%d%H%M 2>/dev/null)
+      [[ -n "$stamp" ]] && touch -t "$stamp" "$p/.planning/STATE.md"
+    fi
+    if [[ "$git_mode" == "fresh" ]]; then
+      ( cd "$p" && git init -q 2>/dev/null && git config user.email t@t && git config user.name t \
+        && git commit -q --allow-empty -m "init" 2>/dev/null )
+    elif [[ "$git_mode" == "stale" ]]; then
+      # Backdated commit (48h ago) via GIT_*_DATE env on initial commit.
+      local back_epoch=$(( $(date +%s) - 172800 ))
+      ( cd "$p" && git init -q 2>/dev/null && git config user.email t@t && git config user.name t \
+        && GIT_AUTHOR_DATE="$back_epoch -0000" GIT_COMMITTER_DATE="$back_epoch -0000" \
+           git commit -q --allow-empty -m "init" 2>/dev/null )
+    fi
+    # git_mode=="none" → no git repo at all, last_commit_epoch empty → stuck_git=1
+    echo "$p"
+  }
+
+  # Test 16: fresh STATE.md → not stuck (no STUCK row added)
+  local fresh_proj
+  fresh_proj=$(_ct_make_proj "fresh-proj" "0" "fresh")
+  local stuck_before=$(_ct_count STUCK_PHASE_DETECTED)
+  continuous_health_monitor >/dev/null 2>&1
+  local stuck_after=$(_ct_count STUCK_PHASE_DETECTED)
+  _ct_assert_eq "$stuck_before" "$stuck_after" "Test 16: fresh project not flagged"
+
+  # Test 17: stuck STATE.md (>24h) + no recent commits → STUCK_PHASE_DETECTED logged
+  echo ""
+  echo "Test 17: Stuck project flagged"
+  rm -rf "$TMP_PORT"/* 2>/dev/null
+  local stuck_proj
+  stuck_proj=$(_ct_make_proj "stuck-proj" "90000" "none")
+  stuck_before=$(_ct_count STUCK_PHASE_DETECTED)
+  continuous_health_monitor >/dev/null 2>&1
+  stuck_after=$(_ct_count STUCK_PHASE_DETECTED)
+  _ct_assert_eq "1" "$((stuck_after - stuck_before))" "Test 17: STUCK_PHASE_DETECTED row added once"
+
+  # Verify reason encodes slug:phase group key (correlation_id is FK-constrained
+  # to decision_id chain, so stuck-group key lives in reason as 'stuck:<slug>:<phase>').
+  local corr_check
+  if [[ -n "$(db_path 2>/dev/null)" ]] && [[ -f "$(db_path)" ]]; then
+    corr_check=$(sqlite3 "$(db_path)" \
+      "SELECT reason FROM decisions WHERE class='continuous' AND decision='STUCK_PHASE_DETECTED' AND reason LIKE 'stuck:stuck-proj:%' ORDER BY ts DESC LIMIT 1;" \
+      2>/dev/null)
+  fi
+  if [[ "$corr_check" == stuck:stuck-proj:Phase\ 7\ \(synthetic-stuck-proj\)\ age:* ]]; then
+    _ct_assert_eq "1" "1" "Test 17a: reason carries stuck:slug:phase group key"
+  else
+    _ct_assert_eq "1" "0" "Test 17a: reason group key (got: '$corr_check')"
+  fi
+
+  # Test 18: 3 invocations within 60min → 3 STUCK rows + 1 STUCK_ESCALATED + ESCALATIONS entry
+  echo ""
+  echo "Test 18: 3 ticks → escalation"
+  # Already 1 STUCK row from Test 17. Run 2 more.
+  continuous_health_monitor >/dev/null 2>&1
+  continuous_health_monitor >/dev/null 2>&1
+  local total_stuck=$(_ct_count STUCK_PHASE_DETECTED)
+  if [[ "$total_stuck" -ge 3 ]]; then
+    _ct_assert_eq "1" "1" "Test 18: ≥3 STUCK_PHASE_DETECTED rows accumulated"
+  else
+    _ct_assert_eq "1" "0" "Test 18: ≥3 STUCK_PHASE_DETECTED rows (got $total_stuck)"
+  fi
+  local escalated_n=$(_ct_count STUCK_ESCALATED)
+  _ct_assert_eq "1" "$escalated_n" "Test 18a: exactly 1 STUCK_ESCALATED row"
+  if [[ -f "$ARK_HOME/ESCALATIONS.md" ]] && grep -q "stuck-proj" "$ARK_HOME/ESCALATIONS.md" 2>/dev/null; then
+    _ct_assert_eq "1" "1" "Test 18b: ESCALATIONS.md mentions stuck-proj"
+  else
+    _ct_assert_eq "1" "0" "Test 18b: ESCALATIONS.md mentions stuck-proj"
+  fi
+
+  # Test 19: 4th invocation within same window → no new STUCK_ESCALATED (24h dedupe)
+  echo ""
+  echo "Test 19: 24h dedupe"
+  continuous_health_monitor >/dev/null 2>&1
+  local escalated_n2=$(_ct_count STUCK_ESCALATED)
+  _ct_assert_eq "$escalated_n" "$escalated_n2" "Test 19: re-running does not re-escalate (24h dedupe)"
+
+  # Test 20: continuous_auto_pause_check — 3 last TICK_COMPLETE all clean → no PAUSE
+  echo ""
+  echo "Test 20: auto-pause-check — clean ticks → no PAUSE"
+  rm -f "$PAUSE_FILE"
+  # Insert 3 fresh clean TICK_COMPLETE rows so the last-3 window is clean.
+  _policy_log "continuous" "TICK_COMPLETE" "p:0 f:0 m:0" "null" >/dev/null 2>&1
+  _policy_log "continuous" "TICK_COMPLETE" "p:0 f:0 m:0" "null" >/dev/null 2>&1
+  _policy_log "continuous" "TICK_COMPLETE" "p:1 f:0 m:0" "null" >/dev/null 2>&1
+  continuous_auto_pause_check
+  if [[ ! -f "$PAUSE_FILE" ]]; then
+    _ct_assert_eq "1" "1" "Test 20: clean tail → no PAUSE created"
+  else
+    _ct_assert_eq "1" "0" "Test 20: clean tail → no PAUSE created"
+  fi
+
+  # Test 21: 3 consecutive TICK_COMPLETE with f:N>0 → PAUSE + AUTO_PAUSED row + idempotent
+  echo ""
+  echo "Test 21: auto-pause-check — 3 failure ticks → PAUSE"
+  rm -f "$PAUSE_FILE"
+  _policy_log "continuous" "TICK_COMPLETE" "p:0 f:1 m:0" "null" >/dev/null 2>&1
+  _policy_log "continuous" "TICK_COMPLETE" "p:0 f:2 m:0" "null" >/dev/null 2>&1
+  _policy_log "continuous" "TICK_COMPLETE" "p:0 f:1 m:0" "null" >/dev/null 2>&1
+  local ap_before=$(_ct_count AUTO_PAUSED)
+  continuous_auto_pause_check
+  local ap_after=$(_ct_count AUTO_PAUSED)
+  if [[ -f "$PAUSE_FILE" ]]; then
+    _ct_assert_eq "1" "1" "Test 21: PAUSE created on 3 failure ticks"
+  else
+    _ct_assert_eq "1" "0" "Test 21: PAUSE created on 3 failure ticks"
+  fi
+  _ct_assert_eq "1" "$((ap_after - ap_before))" "Test 21a: exactly 1 AUTO_PAUSED row added"
+  # Idempotent: re-run with PAUSE present → no new AUTO_PAUSED row
+  continuous_auto_pause_check
+  local ap_idem=$(_ct_count AUTO_PAUSED)
+  _ct_assert_eq "$ap_after" "$ap_idem" "Test 21b: idempotent (PAUSE present → no-op)"
+  rm -f "$PAUSE_FILE"
+
+  # Test 22: Sentinel byte boundaries — subcommands section (07-04 area) unchanged.
+  # Use first-occurrence-only awk (the test code below references the marker
+  # strings in comments, which would otherwise confuse a /pat/,/pat/ range).
+  echo ""
+  echo "Test 22: Subcommands sentinel section untouched (07-04 area)"
+  local sub_md5
+  sub_md5=$(awk '
+    /^# === SECTION: subcommands \(Plan 07-04\) ===$/ { f=1 }
+    f { print }
+    /^# === END SECTION: subcommands ===$/ { if (f) { exit } }
+  ' "$self_path" | md5 -q 2>/dev/null \
+    || awk '
+    /^# === SECTION: subcommands \(Plan 07-04\) ===$/ { f=1 }
+    f { print }
+    /^# === END SECTION: subcommands ===$/ { if (f) { exit } }
+  ' "$self_path" | md5sum | awk '{print $1}')
+  # Expected baseline captured at Plan 07-03 implementation time
+  # (07-02 set the section content; this hash freezes it for downstream waves).
+  if [[ "$sub_md5" == "2df5ee72a693c4d81ac7bd760a955ab5" ]]; then
+    _ct_assert_eq "1" "1" "Test 22: subcommands sentinel md5 byte-identical to 07-02 baseline"
+  else
+    _ct_assert_eq "1" "0" "Test 22: subcommands sentinel md5 baseline (got: $sub_md5)"
+  fi
+
+  unset ARK_PORTFOLIO_ROOT
 
   # Cleanup
   rm -rf "$TMP" 2>/dev/null
