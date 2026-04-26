@@ -655,7 +655,16 @@ main() {
   ( while true; do sleep 5; regen_html; done ) &
   REGEN_PID=$!
 
-  printf '🌐 Ark Dashboard available at http://localhost:%s  (Ctrl-C to stop)\n' "$WEB_PORT"
+  # Detect LAN IP so the user can reach this from a phone on the same wifi.
+  # python http.server binds to all interfaces by default — already LAN-reachable.
+  local _lan_ip
+  _lan_ip=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}')
+
+  printf '🌐 Ark Dashboard running on port %s  (Ctrl-C to stop)\n' "$WEB_PORT"
+  printf '   Local:   http://localhost:%s\n' "$WEB_PORT"
+  if [[ -n "$_lan_ip" ]]; then
+    printf '   Network: http://%s:%s    ← from phone/tablet on same wifi\n' "$_lan_ip" "$WEB_PORT"
+  fi
   printf '   Webroot: %s\n' "$WEB_DIR"
   printf '   Refresh: 5s (browser <meta refresh>)\n\n'
 
