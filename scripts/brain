@@ -165,15 +165,23 @@ cmd_help() {
 Usage: brain [command]
 
 Commands:
-  sync          Pull latest vault, refresh local snapshot (default)
-  status        Show snapshot + decision log state
-  bootstrap     Run new project bootstrap (with brain queries)
-  align         Standardize imported project to canonical structure
-  doctor        Comprehensive health check
-  insights      Show cross-project insights from Phase 6
-  lessons       List all lessons in the brain
-  phase-6       Manually trigger Phase 6 observability daemon
-  init          Initialize .parent-automation in current project
+  AUTONOMOUS DELIVERY:
+    create      Scaffold a new project from cached templates
+    deliver     Run autonomous delivery (plan→execute→verify→deploy each phase)
+
+  PROJECT MANAGEMENT:
+    init        Initialize .parent-automation in current project
+    align       Standardize imported project to canonical structure
+    bootstrap   Record bootstrap decision (manual)
+    sync        Pull latest vault, refresh local snapshot
+
+  OBSERVABILITY:
+    status      Show snapshot + decision log state
+    doctor      Comprehensive health check
+    insights    Show cross-project insights from Phase 6
+    lessons     List all lessons in the brain
+    phase-6     Manually trigger Phase 6 observability daemon
+
   help          Show this help
 
 Environment:
@@ -204,6 +212,8 @@ case "$COMMAND" in
   bootstrap)  cmd_bootstrap ;;
   align)      cmd_align "$@" ;;
   doctor)     bash "$VAULT_PATH/scripts/brain-doctor.sh" ;;
+  create)     shift; bash "$VAULT_PATH/scripts/brain-create.sh" "$@" ;;
+  deliver)    shift; bash "$VAULT_PATH/scripts/brain-deliver.sh" "$@" ;;
   insights)   cmd_insights ;;
   lessons)    cmd_lessons ;;
   phase-6)    cmd_phase6 ;;
