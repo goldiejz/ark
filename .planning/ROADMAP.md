@@ -51,18 +51,19 @@ The following phases are the full AOS journey. Each phase removes one class of "
 
 **Exit criteria:** `policy-evolution.md` shows at least one auto-promoted and one auto-deprecated pattern after a week of real runs. Self-heal first-line retry success rate > 60%.
 
-### Phase 4 — AOS: Bootstrap Autonomy
+### Phase 4 — AOS: Bootstrap Autonomy (complete)
 **Goal:** `ark create` picks stack, deploy, and CLAUDE.md content from a one-line project description with zero prompts.
 
-- [ ] `scripts/bootstrap-policy.sh` — project-type / stack / deploy inference engine
-- [ ] Heuristics from brain templates (project-types/*.md) become policy rules
-- [ ] Per-project-type defaults: e.g., "service desk" → tanstack-router + d1 + workers + queues
-- [ ] Auto-resolves contradictions using `~/vaults/StrategixMSPDocs/project-standard.md`
-- [ ] Strip prompts from `ark-create.sh`; user supplies description only
-- [ ] Per-project `.planning/policy.yml` auto-generated from inferred type
-- [ ] Tier 10 verify: scaffold 5 different project types from 1-line descriptions, no prompts
+- [x] `scripts/bootstrap-policy.sh` — project-type / stack / deploy inference engine
+- [x] Heuristics from brain templates (project-types/*.md) become policy rules (frontmatter `keywords:` / `default_stack:` / `default_deploy:`)
+- [x] Per-project-type defaults: service-desk / revops / ops-intelligence / custom catch-all
+- [x] Auto-resolves contradictions via cascading customer policy (env > project > customer > vault > default)
+- [x] Strip prompts from `ark-create.sh`; user supplies description only (description-mode + backward-compat flag-mode)
+- [x] Per-project `.planning/policy.yml` auto-generated from inferred type (atomic write)
+- [x] Tier 10 verify: 5 fixtures × multi-assert + flag-mode + cascading-customer + low-confidence + isolation md5 (22 checks)
+- [x] `ARK_CREATE_GITHUB` env gate around `gh repo create` (default off — production safety)
 
-**Exit criteria:** `ark create "service desk for managed-print provider" --customer acme` produces a working scaffolded project with zero prompts.
+**Exit criteria:** `ark create "service desk for managed-print provider" --customer acme` produces a working scaffolded project with zero prompts. **Met** — Tier 10 22/22, Tier 7/8/9 retained at 14/25/20.
 
 ### Phase 5 — AOS: Portfolio Autonomy
 **Goal:** Given "ship something" with no project named, Ark picks the highest-leverage project from the portfolio and runs it.

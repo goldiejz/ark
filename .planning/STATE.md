@@ -2,21 +2,21 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: "Phase 3 (AOS: Self-Improving Self-Heal)"
+current_phase: "Phase 4 (AOS: Bootstrap Autonomy)"
 status: complete
-last_updated: "2026-04-26T15:30:00Z"
+last_updated: "2026-04-26T16:25:00Z"
 progress:
-  total_phases: 4
-  completed_phases: 3
-  total_plans: 26
-  completed_plans: 25
-  percent: 96
+  total_phases: 7
+  completed_phases: 4
+  total_plans: 34
+  completed_plans: 33
+  percent: 97
 ---
 
 # Ark — Implementation State
 
-**Last updated:** 2026-04-26T15:30:00Z
-**Current Phase:** Phase 3 (AOS: Self-Improving Self-Heal)
+**Last updated:** 2026-04-26T16:25:00Z
+**Current Phase:** Phase 4 (AOS: Bootstrap Autonomy)
 **Status:** complete
 
 ## Phase 0 — Bootstrap (complete)
@@ -80,6 +80,27 @@ See `.planning/phases/03-self-improving-self-heal/`
 | 03-07 | Tier 9 verify suite (synthetic SQLite fixture, isolated tmp vault, 20 checks; mirrors Phase 2 NEW-W-1 isolation; md5 guarantee on real vault DB) |
 | 03-08 | STRUCTURE.md AOS Self-Improving Self-Heal Contract; REQ-AOS-08..14 minted; STATE.md Phase 3 close; SKILL.md updated; `scripts/execute-phase.sh` restored from `.HALTED` (closes T7+T8 source-count regression) |
 
-## Phase 4+ — Future
+## Phase 4 — AOS: Bootstrap Autonomy (complete)
 
-Next per `.planning/ROADMAP.md`: **Phase 4 — Bootstrap autonomy** (`ark create` runs hands-off; bootstrap-decision learning feeds the same audit log).
+See `.planning/phases/04-bootstrap-autonomy/`
+
+**Goal:** `ark create "<one-line description>" --customer <name>` runs to completion with zero prompts. Inference engine + audit trail + atomic CLAUDE.md/policy.yml writes; backward-compat for flag-mode; production-side-effect gate around `gh repo create`.
+
+**Exit gate:** Tier 10 22/22 + Tier 7/8/9 retained — confirmed `bash scripts/ark-verify.sh --tier 7` 14/14, `--tier 8` 25/25, `--tier 9` 20/20, `--tier 10` 22/22.
+
+| Plan | Outcome |
+|------|---------|
+| 04-01 | `scripts/bootstrap-policy.sh`: keyword-overlap inference engine; `bootstrap_classify` orchestrator emitting TSV verdict + `_policy_log "bootstrap"` audit; confidence threshold escalates `architectural-ambiguity` to ESCALATIONS.md; bash 3 compat; 16-test self-test in isolated tmp vault |
+| 04-02 | `bootstrap/project-types/*-template.md` frontmatter tagged with `keywords:`, `default_stack:`, `default_deploy:`; phrase-aware tokenizer; new `custom-template.md` empty-keyword catch-all; absolute-match scoring (matched × 20, capped 100) |
+| 04-03 | `bootstrap/claude-md-template.md` base with named anchors + 4 `claude-md-addendum/<type>.md` files (service-desk, revops, ops-intelligence, custom); anchor-on-own-line discipline for sed `r`+`d` composition |
+| 04-04 | `scripts/ark-create.sh` description-mode wired through `bootstrap_classify`; sed-pipeline + atomic mv for CLAUDE.md; auto-generated `.planning/policy.yml`; `_policy_log "bootstrap" RESOLVED_FINAL/FLAG_OVERRIDE` audit; `ARK_CREATE_GITHUB` env gate added (default off) after unguarded-`gh repo create` incident |
+| 04-05 | `scripts/lib/bootstrap-customer.sh` mkdir-lock customer dir + idempotent seed; `scripts/lib/policy-config.sh` extended with customer layer (env > project > customer > vault > default) |
+| 04-06 | `scripts/ark` dispatcher `cmd_create` pass-through to ark-create.sh; help text reflects description-mode + flag-mode + `ARK_CREATE_GITHUB` gate; no `read -p` regression |
+| 04-07 | Tier 10 verify suite (5 fixtures × multi-assert + flag-mode + cascading-customer + low-confidence + isolation md5; 22 checks total); Tier 1-9 regression sweep clean |
+| 04-08 | REQ-AOS-15..REQ-AOS-22 minted; STATE.md Phase 4 close; ROADMAP.md checkboxes; STRUCTURE.md AOS Bootstrap Autonomy Contract; SKILL.md Phase 4 posture |
+
+**Known issue (out-of-scope manual cleanup):** During Plan 04-04's first smoke test, an unguarded `gh repo create` block in `ark-create.sh` created an unauthorized public repo at `https://github.com/goldiejz/acme-sd`. The defect was fixed in 04-04 (`ARK_CREATE_GITHUB` env gate, default off). The leftover repo could not be deleted by the agent (token lacked `delete_repo` scope). User must manually delete via `gh repo delete goldiejz/acme-sd --yes` (after granting `delete_repo` scope) or GitHub web UI. See `.planning/phases/04-bootstrap-autonomy/04-04-SUMMARY.md` "Production-side-effect incident (handled)".
+
+## Phase 5+ — Future
+
+Next per `.planning/ROADMAP.md`: **Phase 5 — Portfolio Autonomy** (`ark deliver` with no project named picks the highest-leverage project from the portfolio; per-customer monthly budget caps; cross-project budget routing; Tier 11 verify).
