@@ -625,3 +625,87 @@ Tier 12 in `scripts/ark-verify.sh` runs a synthetic 3-customer fixture under mkt
 - Post-phase hook: `scripts/ark-deliver.sh::run_phase` (after Phase 3 policy-learner trigger)
 - Tier 12 verify: `scripts/ark-verify.sh` (search "Tier 12")
 - Plan-level history: `.planning/phases/06-cross-customer-learning/{06-01..06-06}-SUMMARY.md`
+
+---
+
+## AOS Phase 6.5 — CEO Dashboard Contract
+
+**Phase 6.5 substrate:** Read-only visibility layer over Phase 2-6 audit data. Three-tier delivery; phase exit gate requires all three plus Tier 13 regression sweep. The dashboard is read-only by construction — it never mutates `policy.db`, `ESCALATIONS.md`, `universal-patterns.md`, `anti-patterns.md`, or any vault file. The single permitted "action" path (mark-resolved in Tier B) delegates to the existing single-writer `ark escalations --resolve` command.
+
+### Locked decisions (D-DASH-*)
+
+- **D-DASH-TIER-A-FIRST:** Bash version (`scripts/ark-dashboard.sh`) ships before Rust TUI; phase exit gate requires both. Tier C (web) added in 06.5-08 as a third surface — also part of the exit gate.
+- **D-DASH-READONLY:** Dashboard never writes to `policy.db`, `ESCALATIONS.md`, or any vault file. Mark-resolved delegates to `ark escalations --resolve` (existing single-writer; class `escalation`).
+- **D-DASH-INVOCATION:**
+  - `ark dashboard` (no flag) → Tier A bash (`scripts/ark-dashboard.sh`).
+  - `ark dashboard --tui` → Tier B Rust binary (`scripts/ark-dashboard/target/release/ark-dashboard`).
+  - `ark dashboard --web [--port N]` → Tier C bash + python3 http.server (`scripts/ark-dashboard-web.sh`).
+- **D-DASH-RUST-DEPS:** ratatui + rusqlite + crossterm only. No async runtime. No serde derives beyond what's needed.
+- **D-DASH-RUST-BUILD:** `cd scripts/ark-dashboard && cargo build --release` → `scripts/ark-dashboard/target/release/ark-dashboard`.
+- **D-DASH-REFRESH-TUI:** Rust TUI polls every 2s via `crossterm::event::poll(500ms)` + 2s elapsed-since-last-tick check.
+- **D-DASH-REFRESH-WEB:** Tier C HTML uses `<meta http-equiv="refresh" content="N">` (default 5s). Server-side regen loop refreshes the served HTML on the same cadence; reads via `sqlite3 -readonly`.
+- **D-DASH-WEB-PORT:** Tier C default port 7919; override via `--port N` flag (consumed by `scripts/ark`) or `ARK_DASHBOARD_PORT` env (honored by `scripts/ark-dashboard-web.sh` directly).
+- **D-DASH-WEB-CLEANUP:** Tier C runs python3 as a child (`python3 -m http.server &`) NOT as `exec`, retains the bash cleanup trap, and uses a polling-trap pattern (`STOP=1` flag from INT/TERM trap + `kill -0 $HTTP_PID; sleep 1` loop). Bash 3 `wait` is uninterruptible by signals; polling gives ≤1s cleanup latency. Trap unconditionally kills both children and `rm -rf` the tmpdir.
+- **D-DASH-WEB-ESCAPE:** Tier C HTML-escapes every interpolated value via sed pipeline (defense in depth — server is local-only, but discipline matters).
+- **D-DASH-WEB-ATOMIC:** Tier C writes generated HTML via `tmp + mv` so readers never see a half-rendered page.
+- **D-DASH-DRIFT-TOLERANCE:** Drift detector (Section 6) treats STATE.md vs disk diffs within 60s as INFO (not RED) to avoid false positives during active phases.
+- **D-DASH-DEGRADE:** Color-friendly terminal degradation: `tput colors < 8` OR `NO_COLOR=1` → plain output (Tier A only; Tier C uses CSS light/dark + mobile viewport).
+- **D-DASH-CREATE-GH-CARRY:** The `ARK_CREATE_GITHUB` production-safety env gate (Phase 4 D-CREATE-GH) carries forward — dashboard tiers never create GitHub repos and so never need the gate, but its existence is documented here so future tier additions remember the rule.
+
+### Sections (locked priority order, all three tiers)
+
+1. **Portfolio grid** — projects × current phase × last activity × health (green/yellow/red).
+2. **Escalations panel** — count of pending blockers by class (4 true-blocker types); list view.
+3. **Budget summary** — per-customer monthly burn, headroom percent, `ESCALATE_MONTHLY_CAP` risk.
+4. **Recent decisions stream** — last 50 rows from `policy.db` filtered/grouped by class.
+5. **Learning watch** — patterns approaching promotion threshold (≥3 customers but <60% similarity yet); patterns just promoted.
+6. **Drift detector** — `STATE.md` vs disk reality (catches the drift class 06-03 surfaced).
+7. **Tier health** — last verify report's pass/fail count per tier (7-13); link to report.
+
+### Read-only invariant enforcement
+
+- **Tier A (bash):** every `sqlite3` call uses the `-readonly` flag.
+- **Tier B (Rust):** `Connection::open_with_flags(..., SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX)`. Asserted at the C-API layer.
+- **Tier C (web):** every `sqlite3` call in `scripts/ark-dashboard-web.sh` uses `-readonly`. No write paths exist in the script.
+- **Tier 13 dashboard-only invariant** captures real-vault `policy.db` md5 before each tier's smoke run and re-asserts after the Tier A → Tier B → Tier C sweep. md5 unchanged across all three. Whole-block invariants additionally cover `ESCALATIONS.md`, `universal-patterns.md`, and `anti-patterns.md`.
+
+### Tier C network surface (LAN / Tailscale notes)
+
+`scripts/ark-dashboard-web.sh` defaults to binding to `127.0.0.1` (loopback only). To make the dashboard reachable from a phone or other device on the same Tailscale tailnet or LAN, swap the bind to `0.0.0.0` (one-line change) and access via the machine's MagicDNS name or LAN IP. The post-startup banner emits the served URL; future iterations may auto-detect Tailscale/MagicDNS and print the externally-reachable URL alongside the localhost one. This is currently out of scope for Phase 6.5 (default loopback is correct for a single-laptop CEO use case).
+
+### Decision classes consumed (read-only)
+
+The dashboard reads (never writes) the full set of audit classes minted across Phases 2-6:
+`bootstrap`, `budget`, `dispatch`, `dispatch_failure`, `escalation`, `lesson_promote`, `portfolio`, `self_heal`, `self_improve`, `zero_tasks`. Sections 1, 4, and 5 group/aggregate over this set; Section 2 reads `~/vaults/ark/ESCALATIONS.md`; Section 3 reads `policy.yml` cascading config + per-customer `budget.json` files; Section 5 also reads `~/vaults/ark/lessons/universal-patterns.md` and `~/vaults/ark/bootstrap/anti-patterns.md`; Section 6 cross-checks `~/code/*/.planning/STATE.md` against disk reality; Section 7 reads `~/vaults/ark/observability/verification-reports/*.md`.
+
+### Out of scope (Phase 8+ candidates)
+
+- Push notifications (Slack / macOS) — the queue surface is enough for v1.
+- Multi-machine sync (single-laptop vault).
+- Historical trend charting (Phase 7 weekly-digest covers this textually).
+- Plug-in "employees" UI surface (registry exists; richer plugin model = Phase 8).
+- Auto-detection of Tailscale/MagicDNS/LAN URLs in the Tier C banner (manual `--bind 0.0.0.0` swap suffices for v1).
+- Authentication / authorization on the Tier C web surface (loopback-only by default; LAN exposure is opt-in).
+
+### Verification (Tier 13)
+
+Tier 13 in `scripts/ark-verify.sh` covers all three tiers + regression sweep over Tiers 7-12 in 30 checks (~47s wall time):
+
+- T13.1–8: Tier A — `scripts/ark-dashboard.sh` exists, syntax OK, all 7 sections render against synthetic vault, runtime <2s, real policy.db md5 unchanged.
+- T13.9–14: Tier B — Rust crate builds (cached `target/`), binary launches, refreshes within 2s tick, real policy.db md5 unchanged.
+- T13.15–20: Tier C — `scripts/ark-dashboard-web.sh` syntax OK, HTML served on transient port contains `<table>` + `<meta http-equiv="refresh">`, real policy.db md5 unchanged after Tier C smoke.
+- T13.21: Dispatcher — `ark dashboard --help` mentions all three tiers.
+- T13.22–24: Synthetic vault assertions across portfolio / escalations / recent-decisions sections.
+- T13.25: Dashboard-only md5 invariant — real policy.db md5 unchanged across the Tier A + Tier B + Tier C sweep.
+- T13.26–30: Regression sweep — Tier 7 14/14, Tier 8 ≥23 (baseline 24/25; pre-existing failure unrelated to dashboard), Tier 9 20/20, Tier 10 22/22, Tier 11 16/16, Tier 12 24/24; whole-block md5 invariants on `ESCALATIONS.md`, `universal-patterns.md`, `anti-patterns.md`.
+
+30/30 passing. Phase 6.5 exit gate met.
+
+### Cross-references
+
+- Tier A: `scripts/ark-dashboard.sh`
+- Tier B: `scripts/ark-dashboard/` (Rust crate); binary at `scripts/ark-dashboard/target/release/ark-dashboard`
+- Tier C: `scripts/ark-dashboard-web.sh`
+- Dispatcher: `scripts/ark` (search `dashboard)`)
+- Tier 13 verify: `scripts/ark-verify.sh` (search "Tier 13")
+- Plan-level history: `.planning/phases/06.5-ceo-dashboard/{06.5-01..06.5-08}-SUMMARY.md`
