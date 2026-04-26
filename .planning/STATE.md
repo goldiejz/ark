@@ -2,21 +2,21 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: "Phase 2 (AOS: Delivery Autonomy)"
-status: completed
-last_updated: "2026-04-26T15:28:34.457Z"
+current_phase: "Phase 3 (AOS: Self-Improving Self-Heal)"
+status: complete
+last_updated: "2026-04-26T15:30:00Z"
 progress:
   total_phases: 4
-  completed_phases: 1
-  total_plans: 18
-  completed_plans: 17
-  percent: 94
+  completed_phases: 3
+  total_plans: 26
+  completed_plans: 25
+  percent: 96
 ---
 
 # Ark — Implementation State
 
-**Last updated:** 2026-04-26T13:15:00Z
-**Current Phase:** Phase 2 (AOS: Delivery Autonomy)
+**Last updated:** 2026-04-26T15:30:00Z
+**Current Phase:** Phase 3 (AOS: Self-Improving Self-Heal)
 **Status:** complete
 
 ## Phase 0 — Bootstrap (complete)
@@ -59,6 +59,27 @@ See `.planning/phases/02-autonomy-policy/`
 | 02-08 | Tier 8 verify suite (autonomy under stress): isolated dedup test, schema integrity, entropy stress, dispatcher-route assertions |
 | 02-09 | STRUCTURE.md AOS Escalation Contract; REQ-AOS-01..07 minted; STATE.md updated |
 
-## Phase 3+ — Future
+## Phase 3 — AOS: Self-Improving Self-Heal (complete)
 
-Next per `.planning/ROADMAP.md`: **Phase 3 — Self-improving self-heal** (observer-learner consumes `policy-decisions.jsonl` `decision_id`/`outcome`/`correlation_id` to learn which retry patterns fix tasks).
+See `.planning/phases/03-self-improving-self-heal/`
+
+**Goal:** Audit log → outcome tagger → pattern learner → auto-patch policy.yml under file-lock + git commit + audit entry. Self-improving without losing the schema lock or the true-blocker contract.
+
+**Exit gate:** Tier 9 20/20 + Tier 1–8 retained — confirmed `bash scripts/ark-verify.sh --tier 7` 14/14, `--tier 8` 25/25, `--tier 9` 20/20 (after `execute-phase.sh` restored from `.HALTED` snapshot in 03-08).
+
+**Substrate note:** Phase 2.5 migrated the audit log to SQLite at `~/vaults/ark/observability/policy.db` (schema preserved, `schema_version=1`). Phase 3 reads + patches via `sqlite3`; synthetic fixtures use `INSERT INTO decisions`. See `.planning/phases/03-self-improving-self-heal/SUPERSEDES.md`.
+
+| Plan | Outcome |
+|------|---------|
+| 03-01 | `scripts/lib/outcome-tagger.sh`: SINGLE writer for `outcome` column; idempotent SQL UPDATE; window-configurable inference (success/failure/ambiguous) |
+| 03-02 | `scripts/policy-learner.sh`: pattern scoring by `(class, decision, dispatcher, complexity)` via SQL GROUP BY; 5/80%/20% thresholds; true-blocker filter (`class NOT IN ('escalation','self_improve')`) |
+| 03-03 | `learner_apply_pending`: mkdir-lock + python3/PyYAML atomic patch + vault git commit + `_policy_log self_improve PROMOTED|DEPRECATED` audit |
+| 03-04 | `scripts/lib/policy-digest.sh::learner_write_digest`: `~/vaults/ark/observability/policy-evolution.md` with Promoted, Deprecated, Mediocre sections; idempotent |
+| 03-05 | `scripts/ark-deliver.sh::run_phase` post-phase trigger (after `update_state`, non-fatal, windowed `--since` 1h-ago, output to `.planning/delivery-logs/learner-phase-N.log`); restored ark-deliver.sh from `.HALTED` snapshot |
+| 03-06 | `ark learn` subcommand (default last-7-days, `--full`, `--since DATE`, `--tag-first`) |
+| 03-07 | Tier 9 verify suite (synthetic SQLite fixture, isolated tmp vault, 20 checks; mirrors Phase 2 NEW-W-1 isolation; md5 guarantee on real vault DB) |
+| 03-08 | STRUCTURE.md AOS Self-Improving Self-Heal Contract; REQ-AOS-08..14 minted; STATE.md Phase 3 close; SKILL.md updated; `scripts/execute-phase.sh` restored from `.HALTED` (closes T7+T8 source-count regression) |
+
+## Phase 4+ — Future
+
+Next per `.planning/ROADMAP.md`: **Phase 4 — Bootstrap autonomy** (`ark create` runs hands-off; bootstrap-decision learning feeds the same audit log).
