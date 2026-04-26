@@ -25,12 +25,17 @@ set -uo pipefail
 
 VAULT_PATH="${ARK_HOME:-$HOME/vaults/ark}"
 
+# shellcheck disable=SC1091
+source "$VAULT_PATH/scripts/bootstrap-policy.sh"
+
 PROJECT_NAME=""
 PROJECT_TYPE=""
 CUSTOMER=""
 PROJECT_PATH="$HOME/code"
 STACK=""
 DEPLOY=""
+DESCRIPTION=""
+INFERRED_FROM_DESC=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -41,9 +46,16 @@ while [[ $# -gt 0 ]]; do
     --deploy) DEPLOY="$2"; shift 2 ;;
     --help|-h)
       cat <<EOF
-Usage: ark create <name> --type <type> --customer <customer> [options]
+Usage:
+  ark create "<one-line description>" --customer <name> [options]    (description mode)
+  ark create <name> --type <type> --customer <customer> [options]    (flag mode)
 
-Required:
+Description mode (Phase 4 AOS):
+  ark create "service desk for acme with sla and itil" --customer acme
+  ark create "revops platform for strategix"           --customer strategix
+  ark create "ops intelligence dashboard for testco"   --customer testco
+
+Required (flag mode):
   --type      service-desk | revops | ops-intelligence | marketplace |
               internal-tool | cli-tool | library | static-site | custom
   --customer  Customer name (e.g., acme, strategix)
@@ -76,7 +88,9 @@ EOF
       exit 0
       ;;
     *)
-      if [[ -z "$PROJECT_NAME" ]]; then
+      if [[ "$1" == *" "* ]]; then
+        DESCRIPTION="$1"
+      elif [[ -z "$PROJECT_NAME" ]]; then
         PROJECT_NAME="$1"
       fi
       shift
@@ -84,10 +98,65 @@ EOF
   esac
 done
 
+# === Description-mode resolution: invoke bootstrap_classify when DESCRIPTION present + PROJECT_TYPE absent ===
+if [[ -n "$DESCRIPTION" ]] && [[ -z "$PROJECT_TYPE" ]]; then
+  INFERRED_FROM_DESC=true
+
+  _classify_out=""
+  _rc=0
+  if _classify_out=$(bootstrap_classify "$DESCRIPTION" "$CUSTOMER"); then
+    _rc=0
+  else
+    _rc=$?
+  fi
+
+  _last_line=$(echo "$_classify_out" | tail -n 1)
+  IFS=$'\t' read -r _t _s _d _c _conf <<<"$_last_line"
+
+  PROJECT_TYPE="${PROJECT_TYPE:-$_t}"
+  STACK="${STACK:-$_s}"
+  DEPLOY="${DEPLOY:-$_d}"
+  CUSTOMER="${CUSTOMER:-$_c}"
+
+  if [[ -z "$PROJECT_NAME" ]]; then
+    case "$PROJECT_TYPE" in
+      service-desk)     _suffix="sd" ;;
+      revops)           _suffix="rev" ;;
+      ops-intelligence) _suffix="ops" ;;
+      *)                _suffix="$PROJECT_TYPE" ;;
+    esac
+    PROJECT_NAME="${CUSTOMER}-${_suffix}"
+  fi
+
+  if [[ "$_rc" -ne 0 ]]; then
+    echo "Bootstrap inference confidence below threshold."
+    echo "  Escalation written to $VAULT_PATH/ESCALATIONS.md"
+    echo "  Re-invoke with explicit flags: --type, --stack, --deploy"
+    exit 2
+  fi
+fi
+
 if [[ -z "$PROJECT_NAME" ]] || [[ -z "$PROJECT_TYPE" ]] || [[ -z "$CUSTOMER" ]]; then
   echo "❌ Missing required args. Run: ark create --help"
+  echo "  Description-mode: ark create \"<description>\" --customer <name>"
+  echo "  Flag-mode:        ark create <name> --type <type> --customer <customer>"
   exit 1
 fi
+
+# === Bootstrap audit emission (post-resolution, post-flag-overrides) ===
+_ctx_desc_esc=$(printf '%s' "$DESCRIPTION" | sed 's/\\/\\\\/g; s/"/\\"/g')
+if [[ "$INFERRED_FROM_DESC" == "true" ]]; then
+  _ctx=$(printf '{"description":"%s","name":"%s","type":"%s","stack":"%s","deploy":"%s","customer":"%s","inferred_from_desc":true}' \
+    "$_ctx_desc_esc" "$PROJECT_NAME" "$PROJECT_TYPE" "$STACK" "$DEPLOY" "$CUSTOMER")
+  _policy_log "bootstrap" "RESOLVED_FINAL" "post-flag-overrides resolution" "$_ctx" >/dev/null
+else
+  _ctx=$(printf '{"name":"%s","type":"%s","stack":"%s","deploy":"%s","customer":"%s","inferred_from_desc":false}' \
+    "$PROJECT_NAME" "$PROJECT_TYPE" "$STACK" "$DEPLOY" "$CUSTOMER")
+  _policy_log "bootstrap" "FLAG_OVERRIDE" "explicit flag invocation" "$_ctx" >/dev/null
+fi
+
+# Ensure customer dir exists (04-01 stub; 04-05 hardens with mkdir-lock)
+bootstrap_customer_init "$CUSTOMER" || true
 
 PROJECT_DIR="$PROJECT_PATH/$PROJECT_NAME"
 
@@ -125,90 +194,51 @@ extract_cache_content() {
   fi
 }
 
-# Generate clean CLAUDE.md
-cat > "$PROJECT_DIR/CLAUDE.md" <<EOF
-# $PROJECT_NAME — Repo Instruction
+# Generate CLAUDE.md by atomic template assembly (Phase 4 04-04).
+# Refuse to overwrite an existing CLAUDE.md — emit destructive-op escalation.
+if [[ -f "$PROJECT_DIR/CLAUDE.md" ]]; then
+  _ctx=$(printf '{"path":"%s","name":"%s"}' "$PROJECT_DIR/CLAUDE.md" "$PROJECT_NAME")
+  _policy_log "escalation" "destructive-op" "ark-create would overwrite existing CLAUDE.md" "$_ctx" >/dev/null
+  echo "Refusing to overwrite existing CLAUDE.md at $PROJECT_DIR/CLAUDE.md"
+  exit 3
+fi
 
-> Project-specific. Mutable status lives in \`.planning/STATE.md\`.
+_ADDENDUM_FILE="$VAULT_PATH/bootstrap/claude-md-addendum/${PROJECT_TYPE}.md"
+if [[ ! -f "$_ADDENDUM_FILE" ]]; then
+  _ADDENDUM_FILE="$VAULT_PATH/bootstrap/claude-md-addendum/custom.md"
+fi
 
-## Project
+_FOOTER_SRC="$(bootstrap_customer_dir "$CUSTOMER")/claude-md-footer.md"
+_FOOTER_FILE=""
+if [[ -f "$_FOOTER_SRC" ]]; then _FOOTER_FILE="$_FOOTER_SRC"; fi
 
-$PROJECT_NAME — $PROJECT_TYPE platform for $CUSTOMER.
+_CREATED_DATE="$(date -u +%Y-%m-%d)"
+_CLAUDE_TMP="$PROJECT_DIR/CLAUDE.md.tmp.$$"
 
-## Purpose
+_sed_args=(
+  -e "s|{{PROJECT_NAME}}|$PROJECT_NAME|g"
+  -e "s|{{PROJECT_TYPE}}|$PROJECT_TYPE|g"
+  -e "s|{{CUSTOMER}}|$CUSTOMER|g"
+  -e "s|{{CREATED_DATE}}|$_CREATED_DATE|g"
+  -e "/{{ADDENDUM}}/r $_ADDENDUM_FILE"
+  -e "/{{ADDENDUM}}/d"
+)
+if [[ -n "$_FOOTER_FILE" ]]; then
+  _sed_args+=(-e "/{{CUSTOMER_FOOTER}}/r $_FOOTER_FILE")
+fi
+_sed_args+=(-e "/{{CUSTOMER_FOOTER}}/d")
 
-[TODO: Define durable purpose — what problem does this solve, for whom, why now]
+sed "${_sed_args[@]}" "$VAULT_PATH/bootstrap/claude-md-template.md" > "$_CLAUDE_TMP"
 
-## Current Scope (Phase 1)
+if grep -q '{{[A-Z_]\+}}' "$_CLAUDE_TMP"; then
+  echo "CLAUDE.md assembly failed - leftover anchors:"
+  grep '{{[A-Z_]\+}}' "$_CLAUDE_TMP"
+  rm -f "$_CLAUDE_TMP"
+  exit 4
+fi
 
-[TODO: List core features — be specific, name acceptance criteria]
-
-## Out of Scope
-
-[TODO: Explicit boundaries — what is deferred, what is never planned]
-
-## Constraints
-
-- **Runtime:** Cloudflare Workers (or Pages, depending on type)
-- **Database:** D1 (SQLite) with Drizzle ORM, tenant-scoped via \`tenant_id\`
-- **Auth:** Centralized in \`src/lib/auth.ts\`, role checks via \`requireRole()\`
-- **Currency:** Money columns end in \`_zar\` or \`_usd\`. Duration columns end in \`_minutes\` or \`_seconds\`. Never unsuffixed.
-- **Tenancy:** Multi-tenant from day zero; tenant_id NEVER from request body
-
-## Architecture Conventions
-
-- **Tenant on every business table** — middleware-enforced, never trust user input
-- **RBAC centralized** in \`src/lib/rbac.ts\` — single source of truth for role arrays
-- **Route/compute split** — thin HTTP boundaries, testable business logic
-- **Schema-first migrations** via Drizzle, applied with \`wrangler d1 migrations apply\`
-- **Audit columns** on every business table: created_at, created_by, updated_at, updated_by
-- **Soft delete** on tickets/timesheets/timelines; hard delete forbidden
-- **Event emission** on every mutation — typed events to Cloudflare Queues
-
-## RBAC Structure
-
-See \`src/lib/rbac.ts\` — single source of truth.
-
-Roles: customer | staff | manager | admin
-
-All route guards use \`requireRole(userRole, requiredRole)\`. Never inline role arrays.
-
-## Current Truth Sources
-
-1. \`.planning/STATE.md\` — primary implementation truth (test/route/table counts, deploy posture)
-2. \`.planning/ALPHA.md\` — gate definition (when is this ready)
-3. \`.planning/REQUIREMENTS.md\` — mandatory requirements with evidence
-4. \`.planning/ROADMAP.md\` — phase sequencing
-5. \`tasks/todo.md\` — active backlog
-6. \`tasks/lessons.md\` — captured corrections (rules, not descriptions)
-
-## Workflow
-
-Required reading before any non-trivial change:
-
-1. \`~/vaults/ark/STRUCTURE.md\` — canonical structure
-2. This file
-3. \`.planning/STATE.md\` — live truth
-4. \`.planning/PROJECT.md\` — durable purpose
-5. \`.planning/ROADMAP.md\` — phase sequencing
-6. \`tasks/lessons.md\` — past corrections (don't regress)
-7. \`tasks/todo.md\` — active work
-
-Ark integration: \`.parent-automation/ark-snapshot/\` provides cached templates and 80+ lessons. Run \`ark status\` for current state.
-
-## Anti-Patterns
-
-- Inline role arrays (\`['admin', 'staff'].includes(...)\`) — use \`requireRole()\`
-- Trusting body-supplied tenant_id — always from authenticated session
-- Unsuffixed money columns (\`amount\` instead of \`amount_zar\`)
-- Calling code-shipped "production-ready" without staging verification
-- Skipping \`tasks/lessons.md\` — past lessons must apply
-
-## Drift Rule
-
-If this file contradicts \`.planning/STATE.md\` or current code, this file is wrong. Fix one or the other; never leave them disagreeing.
-EOF
-echo -e "  ${GREEN}✅${NC} CLAUDE.md generated from cached templates"
+mv "$_CLAUDE_TMP" "$PROJECT_DIR/CLAUDE.md"
+echo -e "  ${GREEN}✅${NC} CLAUDE.md assembled (${PROJECT_TYPE} addendum)"
 
 # Generate .planning/ files
 mkdir -p "$PROJECT_DIR/.planning"
@@ -285,6 +315,24 @@ cat > "$PROJECT_DIR/.planning/REQUIREMENTS.md" <<EOF
 EOF
 
 touch "$PROJECT_DIR/.planning/bootstrap-decisions.jsonl"
+
+# Per-project policy.yml — auto-generated, atomic write (Phase 4 04-04).
+_POLICY_TMP="$PROJECT_DIR/.planning/policy.yml.tmp.$$"
+cat > "$_POLICY_TMP" <<EOF
+# Auto-generated by ark create (Phase 4 bootstrap).
+# Cascading config: this file overrides ~/vaults/ark/policy.yml; envvars override both.
+# Read by scripts/lib/policy-config.sh.
+
+bootstrap.project_type: $PROJECT_TYPE
+bootstrap.stack: $STACK
+bootstrap.deploy: $DEPLOY
+bootstrap.customer: $CUSTOMER
+bootstrap.created_date: $(date -u +%Y-%m-%d)
+bootstrap.inferred_from_desc: $INFERRED_FROM_DESC
+EOF
+mv "$_POLICY_TMP" "$PROJECT_DIR/.planning/policy.yml"
+echo -e "  ${GREEN}✅${NC} .planning/policy.yml generated (type=$PROJECT_TYPE stack=$STACK deploy=$DEPLOY)"
+
 echo -e "  ${GREEN}✅${NC} .planning/ files created"
 
 # Create tasks/
@@ -371,7 +419,8 @@ EOF
 # === Step 5: Apply STACK-specific scaffolding ===
 case "$STACK" in
   vite-react-hono)
-    cat > "$PROJECT_DIR/package.json" <<EOF
+    _PKG_TMP="$PROJECT_DIR/package.json.tmp.$$"
+    cat > "$_PKG_TMP" <<EOF
 {
   "name": "$PROJECT_NAME",
   "version": "0.0.1",
@@ -395,6 +444,7 @@ case "$STACK" in
   }
 }
 EOF
+    mv "$_PKG_TMP" "$PROJECT_DIR/package.json"
     echo -e "  ${GREEN}✅${NC} Vite + React + Hono scaffold"
     ;;
 
@@ -584,7 +634,8 @@ case "$DEPLOY" in
   cloudflare-workers)
     # No bindings by default — wrangler can deploy without them
     # User adds bindings via `ark secrets init` after database is created
-    cat > "$PROJECT_DIR/wrangler.toml" <<EOF
+    _WRANGLER_TMP="$PROJECT_DIR/wrangler.toml.tmp.$$"
+    cat > "$_WRANGLER_TMP" <<EOF
 name = "$PROJECT_NAME"
 main = "src/worker.ts"
 compatibility_date = "$(date +%Y-%m-%d)"
@@ -600,11 +651,14 @@ compatibility_flags = ["nodejs_compat"]
 # binding = "CACHE"
 # id = "<get from: wrangler kv namespace create CACHE>"
 EOF
-    cat > "$PROJECT_DIR/.dev.vars.example" <<EOF
+    mv "$_WRANGLER_TMP" "$PROJECT_DIR/wrangler.toml"
+    _DEVVARS_TMP="$PROJECT_DIR/.dev.vars.example.tmp.$$"
+    cat > "$_DEVVARS_TMP" <<EOF
 # Local dev secrets — copy to .dev.vars (gitignored)
 # AUTH_SECRET=
 # DATABASE_URL=
 EOF
+    mv "$_DEVVARS_TMP" "$PROJECT_DIR/.dev.vars.example"
     echo -e "  ${GREEN}✅${NC} Cloudflare Workers config (no bindings — add via ark secrets init)"
     ;;
 
@@ -738,11 +792,18 @@ Type: $PROJECT_TYPE
 Customer: $CUSTOMER
 Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)" --quiet
 
-# === Step 7: GitHub repo (if gh available) ===
-if command -v gh >/dev/null 2>&1; then
+# === Step 7: GitHub repo (gated — production side-effect) ===
+# Phase 4 incident: smoke tests of ark-create previously created real GitHub repos
+# (e.g. goldiejz/acme-sd) because this block was unguarded. Now gated behind
+# explicit opt-in: only fires when ARK_CREATE_GITHUB=true. Tests/verifications
+# default to no GitHub side-effect.
+if [[ "${ARK_CREATE_GITHUB:-false}" == "true" ]] && command -v gh >/dev/null 2>&1; then
   echo ""
   echo "Creating GitHub repo (private)..."
   gh repo create "$PROJECT_NAME" --private --source=. --remote=origin --push --confirm 2>&1 | tail -3 || true
+elif command -v gh >/dev/null 2>&1; then
+  echo ""
+  echo "Skipping GitHub repo creation (set ARK_CREATE_GITHUB=true to enable)."
 fi
 
 # === Step 8: Record decision ===
