@@ -1,0 +1,13 @@
+{
+  "id": "qa-tester",
+  "title": "QA Test Runner",
+  "department": "Quality",
+  "skills": ["test-execution", "tsc-validation", "smoke-tests"],
+  "dispatch": {
+    "type": "cli",
+    "command": "npm test && npx tsc --noEmit"
+  },
+  "cost_per_task": "free",
+  "status": "available",
+  "description": "Runs functional tests and TypeScript checks. Pure tool execution — no AI judgment, just objective pass/fail."
+}

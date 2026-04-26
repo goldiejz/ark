@@ -1,0 +1,13 @@
+{
+  "id": "project-manager",
+  "title": "Project Manager",
+  "department": "Operations",
+  "skills": ["aggregation", "sign-off", "blocker-tracking", "ceo-reporting"],
+  "dispatch": {
+    "type": "cli",
+    "command": "brain pm-signoff"
+  },
+  "cost_per_task": "free",
+  "status": "available",
+  "description": "Aggregates team verdicts (architect, engineer, QC, QA, security). Pure aggregator — no AI calls. Cannot override individual rejections."
+}

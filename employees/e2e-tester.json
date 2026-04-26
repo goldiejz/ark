@@ -1,0 +1,13 @@
+{
+  "id": "e2e-tester",
+  "title": "E2E Test Runner",
+  "department": "Quality",
+  "skills": ["playwright", "user-journey", "regression"],
+  "dispatch": {
+    "type": "claude-subagent",
+    "subagent_type": "e2e-runner"
+  },
+  "cost_per_task": "medium",
+  "status": "available",
+  "description": "End-to-end testing via Playwright. Generates test journeys and verifies critical user flows."
+}

@@ -1,0 +1,13 @@
+{
+  "id": "refactor-cleaner",
+  "title": "Refactor Specialist",
+  "department": "Engineering",
+  "skills": ["dead-code-removal", "consolidation", "knip", "ts-prune"],
+  "dispatch": {
+    "type": "claude-subagent",
+    "subagent_type": "refactor-cleaner"
+  },
+  "cost_per_task": "low",
+  "status": "available",
+  "description": "Removes dead code, unused dependencies, duplicate logic. Runs after major refactors. Uses ts-prune/knip/depcheck."
+}

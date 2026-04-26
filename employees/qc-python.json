@@ -1,0 +1,13 @@
+{
+  "id": "qc-python",
+  "title": "QC Reviewer (Python)",
+  "department": "Quality",
+  "skills": ["pep-8", "type-hints", "pythonic-idioms", "fastapi", "django"],
+  "dispatch": {
+    "type": "claude-subagent",
+    "subagent_type": "python-reviewer"
+  },
+  "cost_per_task": "medium",
+  "status": "available",
+  "description": "Reviews Python code for PEP 8, type hints, idiomatic patterns. Specializes in FastAPI/Django backends."
+}

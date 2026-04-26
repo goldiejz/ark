@@ -1,0 +1,13 @@
+{
+  "id": "security-auditor",
+  "title": "Security Auditor",
+  "department": "Security",
+  "skills": ["owasp", "ssrf", "xss", "sql-injection", "secrets", "auth", "rbac"],
+  "dispatch": {
+    "type": "claude-subagent",
+    "subagent_type": "security-reviewer"
+  },
+  "cost_per_task": "medium",
+  "status": "available",
+  "description": "Audits code changes for vulnerabilities. Hard rejection on CRITICAL/HIGH findings. Always part of phase sign-off gate."
+}

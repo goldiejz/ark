@@ -1,0 +1,13 @@
+{
+  "id": "qc-rust",
+  "title": "QC Reviewer (Rust)",
+  "department": "Quality",
+  "skills": ["ownership", "lifetimes", "error-handling", "unsafe", "performance"],
+  "dispatch": {
+    "type": "claude-subagent",
+    "subagent_type": "rust-reviewer"
+  },
+  "cost_per_task": "medium",
+  "status": "available",
+  "description": "Reviews Rust code for ownership, lifetimes, error handling, and idiomatic patterns."
+}

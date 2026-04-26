@@ -1,0 +1,13 @@
+{
+  "id": "devops-engineer",
+  "title": "DevOps Engineer",
+  "department": "Operations",
+  "skills": ["docker", "wrangler", "ci-cd", "secrets-management"],
+  "dispatch": {
+    "type": "cli",
+    "command": "brain promote"
+  },
+  "cost_per_task": "free",
+  "status": "available",
+  "description": "Handles deployments. Staging is autonomous; production requires --confirm flag. Validates pre-flight checklist."
+}

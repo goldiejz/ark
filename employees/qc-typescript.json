@@ -1,0 +1,13 @@
+{
+  "id": "qc-typescript",
+  "title": "QC Reviewer (TypeScript)",
+  "department": "Quality",
+  "skills": ["type-safety", "esm", "node-conventions", "test-quality", "tsconfig"],
+  "dispatch": {
+    "type": "claude-subagent",
+    "subagent_type": "typescript-reviewer"
+  },
+  "cost_per_task": "medium",
+  "status": "available",
+  "description": "Reviews TypeScript/JavaScript changes for type safety, ESM correctness, idiomatic patterns. Outputs APPROVE/REJECT verdict."
+}

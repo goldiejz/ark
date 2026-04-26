@@ -1,0 +1,13 @@
+{
+  "id": "doc-writer",
+  "title": "Documentation Writer",
+  "department": "Operations",
+  "skills": ["readme", "api-docs", "codemaps", "tutorials"],
+  "dispatch": {
+    "type": "claude-subagent",
+    "subagent_type": "doc-updater"
+  },
+  "cost_per_task": "medium",
+  "status": "available",
+  "description": "Updates README, code maps, and documentation. Triggered when public APIs change or phases complete."
+}

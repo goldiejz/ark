@@ -1,0 +1,13 @@
+{
+  "id": "architect",
+  "title": "Software Architect",
+  "department": "Design",
+  "skills": ["system-design", "decision-making", "trade-offs", "documentation"],
+  "dispatch": {
+    "type": "claude-subagent",
+    "subagent_type": "architect"
+  },
+  "cost_per_task": "high",
+  "status": "available",
+  "description": "Designs the implementation approach for each phase. Produces design.md with files, decisions, risks. Does not write code."
+}

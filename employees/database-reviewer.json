@@ -1,0 +1,13 @@
+{
+  "id": "database-reviewer",
+  "title": "Database Reviewer",
+  "department": "Quality",
+  "skills": ["postgres", "d1", "schema-design", "query-optimization", "migrations"],
+  "dispatch": {
+    "type": "claude-subagent",
+    "subagent_type": "database-reviewer"
+  },
+  "cost_per_task": "medium",
+  "status": "available",
+  "description": "Reviews database changes — schema design, query performance, migration safety. Triggered by changes to migrations/."
+}
