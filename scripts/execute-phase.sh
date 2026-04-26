@@ -179,17 +179,47 @@ Constraints:
     TIMEOUT_CMD="gtimeout 180"
   fi
 
+  # === Pre-flight: check budget tier before dispatching ===
+  if [[ -f "$PROJECT_DIR/.planning/budget-tier.txt" ]]; then
+    local current_tier=$(cat "$PROJECT_DIR/.planning/budget-tier.txt")
+    if [[ "$current_tier" == "BLACK" ]]; then
+      err "🛑 Budget tier BLACK — refusing to dispatch. Run: brain budget --reset"
+      return 1
+    fi
+    log "Current budget tier: $current_tier"
+  fi
+
+  # Get recommended model for current tier (called from project context)
+  local recommended_model=""
+  if cd "$PROJECT_DIR" 2>/dev/null; then
+    recommended_model=$(bash "$VAULT_PATH/scripts/brain-budget.sh" --route engineering 2>/dev/null || echo "codex")
+  fi
+  log "Tier-recommended model: $recommended_model"
+
   # Try Codex first — write prompt to temp file, pass as stdin via redirection
   local prompt_file="/tmp/brain-codex-prompt-$$.txt"
   echo "$prompt" > "$prompt_file"
 
   local output=""
-  if command -v codex >/dev/null 2>&1; then
+
+  # Skip paid models if tier says fallback only
+  if [[ "$recommended_model" == "regex-fallback" ]]; then
+    log "RED tier: skipping AI dispatch, using cached templates only"
+    output="[REGEX FALLBACK — cached pattern only, no AI dispatch]"
+  elif command -v codex >/dev/null 2>&1; then
     log "Dispatching to Codex..."
     if [[ -n "$TIMEOUT_CMD" ]]; then
       output=$($TIMEOUT_CMD codex exec - < "$prompt_file" 2>&1 || echo "")
     else
       output=$(codex exec - < "$prompt_file" 2>&1 || echo "")
+    fi
+
+    # Estimate tokens used (rough: 4 chars/token)
+    if [[ -n "$output" ]]; then
+      local est_tokens=$(( ${#output} / 4 + ${#prompt} / 4 ))
+      if cd "$PROJECT_DIR" 2>/dev/null; then
+        bash "$VAULT_PATH/scripts/brain-budget.sh" --record "$est_tokens" "codex" 2>/dev/null | tail -1
+      fi
     fi
   fi
 
