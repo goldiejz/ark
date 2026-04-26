@@ -26,8 +26,8 @@ struct Args {
     #[arg(short, long, default_value = "~/code")]
     projects: String,
 
-    /// Path to vault (default: ~/vaults/automation-brain)
-    #[arg(short, long, default_value = "~/vaults/automation-brain")]
+    /// Path to vault (default: ~/vaults/ark)
+    #[arg(short, long, default_value = "~/vaults/ark")]
     vault: String,
 
     /// Refresh interval in milliseconds

@@ -43,7 +43,7 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
         Tab::Metrics => 3,
     };
 
-    let title = format!("🧠 BRAIN OS — Executive Dashboard │ refresh {}", app.last_refresh);
+    let title = format!("🚢 ARK — Executive Dashboard │ refresh {}", app.last_refresh);
     let tabs = Tabs::new(titles.into_iter().map(Line::from).collect::<Vec<_>>())
         .block(
             Block::default()
@@ -106,7 +106,7 @@ fn render_help_overlay(f: &mut Frame) {
         Line::from("    q / Esc           Quit"),
         Line::from(""),
         Line::from("  Panels:"),
-        Line::from("    Projects  All brain-integrated projects"),
+        Line::from("    Projects  All ark-integrated projects"),
         Line::from("    Employees Pluggable agent roster (vault/employees/)"),
         Line::from("    Events    Recent decisions, budget tier changes"),
         Line::from("    Metrics   Aggregate stats: tokens, lessons, projects"),
